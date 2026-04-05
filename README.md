@@ -197,6 +197,10 @@ make shell-db     # PostgreSQL shell
 - **Single DuckDB file** — fine for millions of rows, may need sharding at billions
 - **No volume data** — OHLC only, no tick or volume columns
 
+## Disclaimer
+
+Built in an afternoon out of personal need — I wanted a single place to dump MT5 CSV exports and query them without spinning up a full data warehouse. It works, it's tested, but it's not battle-hardened. If you use it, expect to tweak things to fit your setup.
+
 ## License
 
 MIT

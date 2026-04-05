@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: datalake-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-datalake}
+      POSTGRES_USER: ${POSTGRES_USER:-datalake}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datalake}
+    ports:
+      - "${POSTGRES_PORT:-6543}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datalake}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datalake-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ohlc-datalake-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datalake}:${POSTGRES_PASSWORD:-datalake}@postgres:5432/${POSTGRES_DB:-datalake}
+      DUCKDB_PATH: /app/datalake/ohlc.duckdb
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./datalake:/app/datalake
+      - ./staging:/app/staging
+      # Mount source code for hot-reload during development.
+      # Comment out or remove this line for production deployments.
+      - ./src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - datalake-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  datalake-network:
+    driver: bridge

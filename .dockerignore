@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# Data directories (mounted as volumes)
+datalake/
+staging/
+backups/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Docker (don't copy these into the image)
+docker-compose*.yml
+.dockerignore
+
+# Docs
+*.md
+LICENSE
+
+# Environment (secrets)
+.env
+.env.*
+
+# Tests
+tests/
+pytest.ini
+
+# CI/tooling
+.claude/
+.beads/

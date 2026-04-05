@@ -41,6 +41,7 @@ def init_duckdb():
                 PRIMARY KEY (instrument, timeframe, timestamp)
             )
         """)
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlc_pk ON ohlc_data(instrument, timeframe, timestamp)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_instrument_timeframe ON ohlc_data(instrument, timeframe)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON ohlc_data(timestamp)")
         logger.info("DuckDB initialized", extra={"path": str(DUCKDB_PATH)})

@@ -1,40 +1,41 @@
-# OHLC Datalake API
+# Datalake API
 
-A containerized REST API for storing and querying OHLC (Open, High, Low, Close) financial market data. Built with FastAPI, DuckDB for analytical queries, and PostgreSQL for authentication.
+A containerized REST API for storing and querying financial market data — both OHLC bars and tick-level data. Built with FastAPI, DuckDB for analytical queries, and PostgreSQL for authentication. Includes WebSocket streaming for live-feed simulation.
 
-Designed for personal use by algo traders who need a central store for historical price data imported from CSV exports (MetaTrader 5 format auto-detected).
+Designed for personal use by algo traders who need a central store for historical price data imported from CSV exports (MetaTrader 5 and Dukascopy formats auto-detected).
 
 ## Architecture
 
 ```
-  ┌──────────────┐              ┌──────────────┐
-  │  CSV / Excel │              │   REST API   │
-  │   uploads    │              │   clients    │
-  └──────┬───────┘              └──────┬───────┘
-         │                             │
-         ▼                             │
-┌────────────────┐                     │
-│  FastAPI app   │◄────────────────────┘
-│  (src/api.py)  │
-└───────┬────────┘
-        │
-  ┌─────┴─────┐
-  ▼           ▼
-┌────────┐  ┌────────────┐
-│ DuckDB │  │ PostgreSQL │
-│  OHLC  │  │ users &    │
-│  data  │  │ API keys   │
-└────────┘  └────────────┘
+  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+  │  CSV / Excel │   │   REST API   │   │  WebSocket   │
+  │   uploads    │   │   clients    │   │  consumers   │
+  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+         │                  │                   │
+         ▼                  ▼                   ▼
+       ┌─────────────────────────────────────────┐
+       │          FastAPI app (src/api.py)        │
+       └───────────────────┬─────────────────────┘
+                           │
+                     ┌─────┴─────┐
+                     ▼           ▼
+               ┌──────────┐  ┌────────────┐
+               │  DuckDB  │  │ PostgreSQL │
+               │ OHLC +   │  │ users &    │
+               │ tick data │  │ API keys   │
+               └──────────┘  └────────────┘
 ```
 
 | Component | Purpose |
 |-----------|---------|
-| **DuckDB** | All OHLC data in a single embedded file (`datalake/ohlc.duckdb`). Fast columnar scans. |
+| **DuckDB** | OHLC bars and tick data in a single embedded file (`datalake/ohlc.duckdb`). Fast columnar scans. |
 | **PostgreSQL** | User accounts and API keys. |
-| **FastAPI** | REST API for ingestion, querying, and auth. |
+| **FastAPI** | REST + WebSocket API for ingestion, querying, streaming, and auth. |
 | **Docker Compose** | Orchestrates PostgreSQL + API. DuckDB is bind-mounted. |
 
 ## Data Ingestion
+
+### OHLC bars
 
 Export OHLC data from your trading platform as CSV with columns: `timestamp`, `open`, `high`, `low`, `close`. MetaTrader's `<DATE>`, `<TIME>`, `<OPEN>`, `<HIGH>`, `<LOW>`, `<CLOSE>` export format is auto-detected. Excel files (`.xlsx`, `.xls`) also supported.
 
@@ -50,6 +51,50 @@ curl -X POST http://localhost:8000/ingest \
 curl -X POST http://localhost:8000/ingest-batch \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+### Tick data
+
+Tick CSV files with columns: `timestamp`, `price`, `volume` (optional: `bid`, `ask`). If only `bid`/`ask` are provided, `price` is computed as the mid. Auto-detects MetaTrader tick exports (`<DATE>`, `<BID>`, `<ASK>`, `<LAST>`, `<VOLUME>`) and Dukascopy format (`Gmt time`, `Bid`, `Ask`, `Volume`).
+
+```bash
+# Single file
+curl -X POST http://localhost:8000/ingest/ticks \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@XAUUSD_ticks_202401.csv" \
+  -F "instrument=XAUUSD"
+
+# Batch: place files in staging/ as {INSTRUMENT}_TICK_*.csv
+curl -X POST http://localhost:8000/ingest-batch/ticks \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## WebSocket Streaming
+
+Live-feed simulation by replaying historical data over WebSocket. Useful for backtesting dashboards.
+
+```bash
+# Stream ticks at real-time speed
+wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&speed=1"
+
+# Stream M5 bars at 60x speed (one bar per second)
+wscat -c "ws://localhost:8000/ws/bars?instrument=XAUUSD&timeframe=M5&speed=60"
+
+# Fast delivery for dashboard replay (consumer controls pacing)
+wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&speed=1000&max_delay=0.1"
+
+# Burst mode — no pacing, all rows as fast as possible
+wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&max_delay=0"
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `instrument` | required | Symbol to stream |
+| `timeframe` | required (bars only) | Bar timeframe (M5, H1, etc.) |
+| `start` / `end` | — | ISO-8601 time range filter |
+| `speed` | `1.0` | Playback multiplier (1 = real-time, 10 = 10x) |
+| `max_delay` | `10.0` | Max seconds between messages (0 = burst) |
+
+Each message is a JSON object. Stream ends with `{"done": true}`.
 
 ## Quick Start
 
@@ -85,11 +130,15 @@ export TOKEN="eyJ..."
 ### 4. Query
 
 ```bash
-# Public if ALLOW_PUBLIC_READS=true (default)
+# OHLC query (public if ALLOW_PUBLIC_READS=true)
 curl "http://localhost:8000/query?instrument=XAUUSD&timeframe=M5&start=2024-01-01&end=2024-12-31&limit=100"
 
+# Tick query
+curl "http://localhost:8000/ticks?instrument=XAUUSD&start=2024-01-01&limit=10000"
+
 # Download as CSV
-curl "http://localhost:8000/download?instrument=XAUUSD&timeframe=M5" -o output.csv
+curl "http://localhost:8000/download?instrument=XAUUSD&timeframe=M5" -o ohlc.csv
+curl "http://localhost:8000/ticks/download?instrument=XAUUSD" -o ticks.csv
 ```
 
 ## API Reference
@@ -106,13 +155,19 @@ Interactive docs at `http://localhost:8000/docs`.
 | `PATCH /auth/api-keys/{id}` | JWT | Update API key |
 | `DELETE /auth/api-keys/{id}` | JWT | Revoke API key |
 | `GET /query` | Public* | Query OHLC data (cursor-paginated) |
-| `GET /download` | Public* | Download as CSV |
-| `GET /catalog` | Public* | Database stats and coverage |
-| `GET /instruments` | Public* | List instruments |
-| `GET /instruments/{symbol}` | Public* | Coverage per timeframe |
-| `GET /timeframes` | Public* | List timeframes |
-| `POST /ingest` | Write | Upload CSV/Excel file |
-| `POST /ingest-batch` | Write | Batch import from folder |
+| `GET /download` | Public* | Download OHLC as CSV |
+| `GET /ticks` | Public* | Query tick data (cursor-paginated) |
+| `GET /ticks/download` | Public* | Download ticks as CSV |
+| `GET /catalog` | Public* | Database stats and coverage (OHLC + ticks) |
+| `GET /instruments` | Public* | List instruments (OHLC + ticks) |
+| `GET /instruments/{symbol}` | Public* | Coverage per timeframe (incl. TICK) |
+| `GET /timeframes` | Public* | List timeframes (incl. TICK) |
+| `POST /ingest` | Write | Upload OHLC CSV/Excel file |
+| `POST /ingest-batch` | Write | Batch import OHLC from folder |
+| `POST /ingest/ticks` | Write | Upload tick CSV file |
+| `POST /ingest-batch/ticks` | Write | Batch import ticks from folder |
+| `WS /ws/ticks` | No | Stream tick data (live-feed replay) |
+| `WS /ws/bars` | No | Stream OHLC bars (live-feed replay) |
 | `GET /healthcheck` | No | Health check |
 
 *Public when `ALLOW_PUBLIC_READS=true` (default), requires auth when `false`.
@@ -161,21 +216,22 @@ src/
 │   └── auth.py             # JWT + API key auth
 ├── core/
 │   ├── database.py         # SQLAlchemy models (User, APIKey)
-│   ├── datalake.py         # DuckDB operations
+│   ├── datalake.py         # DuckDB operations (OHLC + tick tables)
 │   └── pagination.py       # Cursor-based pagination
 ├── middleware/
 │   ├── logging_config.py   # Structured JSON logging
 │   └── middleware.py        # Request logging
 ├── services/
-│   ├── pipeline.py         # CSV/Excel ingestion
+│   ├── pipeline.py         # CSV/Excel ingestion (OHLC + tick)
 │   └── validators.py       # Input validation
 └── routes/
     ├── auth_routes.py      # /auth/*
     ├── catalog.py          # /catalog
     ├── health.py           # /healthcheck
-    ├── ingest.py           # /ingest
+    ├── ingest.py           # /ingest, /ingest/ticks
     ├── instruments.py      # /instruments, /timeframes
-    └── query.py            # /query, /download
+    ├── query.py            # /query, /download, /ticks, /ticks/download
+    └── stream.py           # /ws/ticks, /ws/bars (WebSocket streaming)
 ```
 
 ## Make Commands
@@ -195,7 +251,7 @@ make shell-db     # PostgreSQL shell
 ## Known Limitations
 
 - **Single DuckDB file** — fine for millions of rows, may need sharding at billions
-- **No volume data** — OHLC only, no tick or volume columns
+- **WebSocket streaming has no auth** — suitable for local/trusted networks, not public-facing without a proxy
 
 ## Disclaimer
 

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
-from src.core.datalake import get_database_stats, list_instruments, list_timeframes, get_data_range
+from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage
 from src.auth.auth import ScopedAuth
 
 logger = get_logger(__name__)
@@ -23,6 +23,7 @@ def get_catalog(
     """
     try:
         stats = get_database_stats()
+        tick_stats = get_tick_database_stats()
 
         coverage = []
         for instrument in list_instruments():
@@ -37,7 +38,19 @@ def get_catalog(
                         "record_count": data_range["count"],
                     })
 
-        return {"status": "ok", "database": stats, "coverage": coverage}
+        # Include tick coverage
+        for instrument in list_tick_instruments():
+            tick_cov = get_tick_coverage(instrument)
+            if tick_cov:
+                coverage.append({
+                    "instrument": instrument,
+                    "timeframe": "TICK",
+                    "min_date": str(tick_cov["min_date"]) if tick_cov["min_date"] else None,
+                    "max_date": str(tick_cov["max_date"]) if tick_cov["max_date"] else None,
+                    "record_count": tick_cov["count"],
+                })
+
+        return {"status": "ok", "database": stats, "tick_database": tick_stats, "coverage": coverage}
     except Exception as e:
         logger.error("Failed to retrieve catalog", exc_info=True)
         return {"status": "error", "message": str(e)}

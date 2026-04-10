@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
-from src.core.datalake import list_instruments, list_timeframes, get_data_range
+from src.core.datalake import list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage
 from src.services.validators import validate_instrument
 from src.auth.auth import ScopedAuth
 
@@ -17,7 +17,10 @@ def get_instruments(
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
 ):
     """List all instruments that have data in the datalake."""
-    return {"instruments": list_instruments()}
+    ohlc = set(list_instruments())
+    tick = set(list_tick_instruments())
+    all_instruments = sorted(ohlc | tick)
+    return {"instruments": all_instruments}
 
 
 @router.get("/instruments/{symbol}")
@@ -29,8 +32,6 @@ def get_instrument_detail(
     symbol = validate_instrument(symbol)
 
     timeframes = list_timeframes(symbol)
-    if not timeframes:
-        raise HTTPException(status_code=404, detail=f"Instrument '{symbol}' not found")
 
     coverage = []
     for tf in timeframes:
@@ -43,6 +44,19 @@ def get_instrument_detail(
                 "record_count": data_range["count"],
             })
 
+    # Include tick coverage if available
+    tick_cov = get_tick_coverage(symbol)
+    if tick_cov:
+        coverage.append({
+            "timeframe": "TICK",
+            "min_date": str(tick_cov["min_date"]) if tick_cov["min_date"] else None,
+            "max_date": str(tick_cov["max_date"]) if tick_cov["max_date"] else None,
+            "record_count": tick_cov["count"],
+        })
+
+    if not timeframes and not tick_cov:
+        raise HTTPException(status_code=404, detail=f"Instrument '{symbol}' not found")
+
     return {"symbol": symbol, "timeframes": coverage}
 
 
@@ -54,4 +68,14 @@ def get_timeframes(
     """List available timeframes, optionally filtered by instrument."""
     if instrument:
         instrument = validate_instrument(instrument)
-    return {"timeframes": list_timeframes(instrument)}
+    tfs = list_timeframes(instrument)
+
+    # Include TICK if tick data exists for the instrument (or any instrument)
+    if instrument:
+        if get_tick_coverage(instrument):
+            tfs.append("TICK")
+    else:
+        if list_tick_instruments():
+            tfs.append("TICK")
+
+    return {"timeframes": tfs}

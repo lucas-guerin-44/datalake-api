@@ -11,6 +11,8 @@ INSTRUMENT_PATTERN = re.compile(r'^[A-Za-z0-9_\-&]+$')
 TIMEFRAME_PATTERN = re.compile(r'^(M|H|D|W|MN)\d+$', re.IGNORECASE)
 TIMEFRAME_ALT_PATTERN = re.compile(r'^\d+(m|h|d|w|M|H|D|W)$')
 
+VALID_SPECIAL_TIMEFRAMES = {"TICK"}
+
 MAX_INSTRUMENT_LENGTH = 50
 MAX_TIMEFRAME_LENGTH = 10
 
@@ -51,6 +53,9 @@ def validate_timeframe(timeframe: str) -> str:
 
     if '..' in timeframe or '/' in timeframe or '\\' in timeframe:
         raise HTTPException(status_code=400, detail="Invalid timeframe: path traversal detected")
+
+    if timeframe.upper() in VALID_SPECIAL_TIMEFRAMES:
+        return timeframe.upper()
 
     if not TIMEFRAME_PATTERN.match(timeframe) and not TIMEFRAME_ALT_PATTERN.match(timeframe):
         raise HTTPException(

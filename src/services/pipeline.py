@@ -1,5 +1,5 @@
 """
-Data ingestion pipeline for OHLC data.
+Data ingestion pipeline for OHLC and tick data.
 Reads CSV/Excel files and inserts data into DuckDB.
 """
 from pathlib import Path
@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.middleware.logging_config import get_logger
 from src.services.validators import validate_instrument, validate_timeframe
-from src.core.datalake import upsert_ohlc_data, init_duckdb
+from src.core.datalake import upsert_ohlc_data, upsert_tick_data, init_duckdb
 
 logger = get_logger(__name__)
 
@@ -121,3 +121,123 @@ def ingest_dataframe(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
         raise ValueError("DataFrame must have a 'timestamp' column")
 
     return upsert_ohlc_data(_standardize(df.copy()), instrument, timeframe)
+
+
+# --- Tick data pipeline ---
+
+TICK_REQUIRED_COLS = ["timestamp", "price"]
+
+
+def _read_raw_tick(path: Path) -> pd.DataFrame:
+    """Read a raw tick CSV file, auto-detecting MetaTrader and Dukascopy formats."""
+    with open(path, "rb") as f:
+        first_line = f.readline().decode(errors="ignore")
+
+    # MetaTrader tick export: <DATE> <TIME> <BID> <ASK> <LAST> <VOLUME>
+    if "<DATE>" in first_line and ("<BID>" in first_line or "<LAST>" in first_line):
+        df = pd.read_csv(path, sep=r"\s+", engine="python")
+        if "<TIME>" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["<DATE>"] + " " + df["<TIME>"], utc=True)
+        else:
+            df["timestamp"] = pd.to_datetime(df["<DATE>"], utc=True)
+
+        rename = {}
+        if "<BID>" in df.columns:
+            rename["<BID>"] = "bid"
+        if "<ASK>" in df.columns:
+            rename["<ASK>"] = "ask"
+        if "<LAST>" in df.columns:
+            rename["<LAST>"] = "price"
+        if "<VOLUME>" in df.columns:
+            rename["<VOLUME>"] = "volume"
+        df = df.rename(columns=rename)
+
+        # Compute mid price from bid/ask if no explicit price
+        if "price" not in df.columns and "bid" in df.columns and "ask" in df.columns:
+            df["price"] = (df["bid"] + df["ask"]) / 2
+
+        keep = [c for c in df.columns if c in ["timestamp", "price", "volume", "bid", "ask"]]
+        return df[keep]
+
+    # Dukascopy format: Gmt time,Bid,Ask,Volume
+    lower_first = first_line.lower()
+    if "gmt time" in lower_first or ("bid" in lower_first and "ask" in lower_first and "open" not in lower_first):
+        df = pd.read_csv(path)
+        df.columns = [c.strip().lower() for c in df.columns]
+        rename = {}
+        for col in df.columns:
+            if "gmt" in col or "time" in col:
+                rename[col] = "timestamp"
+        df = df.rename(columns=rename)
+
+        if "price" not in df.columns and "bid" in df.columns and "ask" in df.columns:
+            df["price"] = (df["bid"] + df["ask"]) / 2
+
+        keep = [c for c in df.columns if c in ["timestamp", "price", "volume", "bid", "ask"]]
+        return df[keep]
+
+    # Generic tick CSV: timestamp, price, volume (optional bid, ask)
+    try:
+        df = pd.read_csv(path)
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, encoding="utf-16")
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+
+def standardize_tick_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize tick data: validate columns, compute mid price if needed, clean up."""
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # Compute mid price from bid/ask if price column is missing
+    if "price" not in df.columns:
+        if "bid" in df.columns and "ask" in df.columns:
+            df["price"] = (df["bid"] + df["ask"]) / 2
+        else:
+            raise ValueError("Missing 'price' column and cannot compute from bid/ask")
+
+    missing = [c for c in TICK_REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns after mapping: {missing}")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    if df["timestamp"].isna().any():
+        bad = df[df["timestamp"].isna()].shape[0]
+        raise ValueError(f"Found {bad} rows with invalid timestamps")
+
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    if df["price"].isna().any() or (df["price"] <= 0).any():
+        raise ValueError("Tick data contains NaN or non-positive prices")
+
+    for col in ["volume", "bid", "ask"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.drop_duplicates().sort_values("timestamp")
+    return df
+
+
+def ingest_tick_file(file: Path, instrument: str) -> int:
+    """Ingest a single tick CSV file into DuckDB. Returns the number of rows inserted."""
+    instrument = validate_instrument(instrument)
+
+    logger.info("Starting tick file ingestion", extra={"file": str(file), "instrument": instrument})
+
+    init_duckdb()
+    raw = _read_raw_tick(file)
+    df = standardize_tick_csv(raw)
+    rows_inserted = upsert_tick_data(df, instrument)
+
+    logger.info("Tick file ingestion completed", extra={"file": str(file), "instrument": instrument, "rows_inserted": rows_inserted})
+    return rows_inserted
+
+
+def ingest_tick_dataframe(df: pd.DataFrame, instrument: str) -> int:
+    """Ingest a tick DataFrame directly into DuckDB."""
+    instrument = validate_instrument(instrument)
+    init_duckdb()
+
+    if "timestamp" not in df.columns:
+        raise ValueError("DataFrame must have a 'timestamp' column")
+
+    return upsert_tick_data(standardize_tick_csv(df.copy()), instrument)

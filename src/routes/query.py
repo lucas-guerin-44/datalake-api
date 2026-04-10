@@ -1,4 +1,4 @@
-"""Query routes - query and download OHLC data from DuckDB."""
+"""Query routes - query and download OHLC and tick data from DuckDB."""
 import asyncio
 import csv
 import io
@@ -142,4 +142,119 @@ async def download_data(
         csv_generator(),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={instrument}_{timeframe}_data.csv"},
+    )
+
+
+@router.get("/ticks")
+def query_ticks_api(
+    instrument: str = Query(...),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    limit: int = Query(10000, ge=1, le=100000, description="Page size (1-100000)"),
+    cursor: Optional[str] = Query(None, description="Pagination cursor from previous response"),
+    current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+):
+    """Query tick data from DuckDB with cursor-based pagination."""
+    instrument = validate_instrument(instrument)
+
+    cursor_timestamp = None
+    if cursor:
+        cursor_timestamp = decode_cursor(cursor, instrument, None)
+
+    conditions = ["instrument = ?"]
+    params = [instrument]
+
+    if cursor_timestamp:
+        conditions.append("timestamp > ?::TIMESTAMP")
+        params.append(cursor_timestamp)
+    elif start:
+        conditions.append("timestamp >= ?::TIMESTAMP")
+        params.append(start)
+    if end:
+        conditions.append("timestamp <= ?::TIMESTAMP")
+        params.append(end)
+
+    fetch_limit = limit + 1
+    sql = f"""
+    SELECT timestamp, price, volume, bid, ask
+    FROM tick_data
+    WHERE {' AND '.join(conditions)}
+    ORDER BY timestamp
+    LIMIT {fetch_limit}
+    """
+
+    with get_db_connection() as con:
+        df = con.execute(sql, params).fetchdf()
+
+    has_more = len(df) > limit
+    if has_more:
+        df = df.head(limit)
+
+    df["timestamp"] = df["timestamp"].astype(str)
+    result = df.to_dict(orient="records")
+
+    next_cursor = None
+    if has_more and result:
+        next_cursor = encode_cursor(result[-1]["timestamp"], instrument, None)
+
+    response = {
+        "data": result,
+        "pagination": {"limit": limit, "count": len(result), "has_more": has_more},
+    }
+    if next_cursor:
+        response["pagination"]["next_cursor"] = next_cursor
+
+    return JSONResponse(content=response)
+
+
+@router.get("/ticks/download")
+async def download_ticks(
+    instrument: str = Query(...),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+):
+    """Download tick data as a streaming CSV file."""
+    instrument = validate_instrument(instrument)
+
+    conditions = ["instrument = ?"]
+    params = [instrument]
+    if start:
+        conditions.append("timestamp >= ?::TIMESTAMP")
+        params.append(start)
+    if end:
+        conditions.append("timestamp <= ?::TIMESTAMP")
+        params.append(end)
+
+    sql = f"""
+    SELECT timestamp, price, volume, bid, ask
+    FROM tick_data
+    WHERE {' AND '.join(conditions)}
+    ORDER BY timestamp
+    """
+
+    async def csv_generator():
+        with get_db_connection() as con:
+            db_cursor = con.execute(sql, params)
+            header = [desc[0] for desc in db_cursor.description]
+
+            output = io.StringIO()
+            writer = csv.writer(output, lineterminator="\n")
+
+            writer.writerow(header)
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+
+            for row in db_cursor.fetchall():
+                writer.writerow(row)
+                yield output.getvalue()
+                output.seek(0)
+                output.truncate(0)
+                await asyncio.sleep(0)
+
+    return StreamingResponse(
+        csv_generator(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={instrument}_TICK_data.csv"},
     )

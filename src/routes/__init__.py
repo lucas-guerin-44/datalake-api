@@ -5,6 +5,7 @@ from src.routes.query import router as query_router
 from src.routes.ingest import router as ingest_router
 from src.routes.auth_routes import router as auth_router
 from src.routes.health import router as health_router
+from src.routes.stream import router as stream_router
 
 __all__ = [
     "catalog_router",
@@ -13,4 +14,5 @@ __all__ = [
     "ingest_router",
     "auth_router",
     "health_router",
+    "stream_router",
 ]

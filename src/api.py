@@ -13,12 +13,13 @@ from src.routes import (
     ingest_router,
     auth_router,
     health_router,
+    stream_router,
 )
 
 setup_logging()
 logger = get_logger(__name__)
 
-app = FastAPI(title="OHLC Datalake API")
+app = FastAPI(title="Datalake API")
 
 app.add_middleware(RequestLoggingMiddleware)
 
@@ -28,6 +29,7 @@ app.include_router(query_router)
 app.include_router(ingest_router)
 app.include_router(auth_router)
 app.include_router(health_router)
+app.include_router(stream_router)
 
 
 @app.on_event("startup")

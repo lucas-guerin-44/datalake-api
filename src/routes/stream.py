@@ -38,26 +38,30 @@ async def _stream_rows(
     Sends a final {"done": true} when replay is complete.
     """
     prev_ts: Optional[datetime] = None
+    BATCH_SIZE = 1000
 
     with get_db_connection() as con:
-        cursor = con.execute(sql, params)
-        rows = cursor.fetchall()
+        db_cursor = con.execute(sql, params)
 
-    for row in rows:
-        record = dict(zip(columns, row))
+        while True:
+            batch = db_cursor.fetchmany(BATCH_SIZE)
+            if not batch:
+                break
 
-        # Convert timestamp to string for JSON serialization
-        ts = _parse_ts(record["timestamp"])
-        record["timestamp"] = ts.isoformat()
+            for row in batch:
+                record = dict(zip(columns, row))
 
-        # Pace by real-time delta between rows, capped by max_delay
-        if prev_ts is not None and speed > 0 and max_delay > 0:
-            delta = (ts - prev_ts).total_seconds() / speed
-            if delta > 0:
-                await asyncio.sleep(min(delta, max_delay))
+                ts = _parse_ts(record["timestamp"])
+                record["timestamp"] = ts.isoformat()
 
-        prev_ts = ts
-        await ws.send_text(json.dumps(record))
+                # Pace by real-time delta between rows, capped by max_delay
+                if prev_ts is not None and speed > 0 and max_delay > 0:
+                    delta = (ts - prev_ts).total_seconds() / speed
+                    if delta > 0:
+                        await asyncio.sleep(min(delta, max_delay))
+
+                prev_ts = ts
+                await ws.send_text(json.dumps(record))
 
     await ws.send_text(json.dumps({"done": True}))
 

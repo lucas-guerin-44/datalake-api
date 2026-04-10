@@ -2,6 +2,8 @@
 DuckDB-based OHLC and tick data storage.
 All data lives in a single embedded database file.
 """
+import threading
+
 import duckdb
 import pandas as pd
 from typing import Optional, List
@@ -9,21 +11,38 @@ from contextlib import contextmanager
 
 from src.middleware.logging_config import get_logger
 from src.services.validators import validate_instrument, validate_timeframe
-from src.config import DUCKDB_PATH
+from src.config import DUCKDB_PATH, DUCKDB_MEMORY_LIMIT
 
 logger = get_logger(__name__)
 
 DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# Shared connection — DuckDB supports concurrent reads from a single connection.
+# Writes acquire an internal lock automatically.
+_db_lock = threading.Lock()
+_db_connection: Optional[duckdb.DuckDBPyConnection] = None
+
+
+def _get_shared_connection() -> duckdb.DuckDBPyConnection:
+    """Get or create the shared DuckDB connection."""
+    global _db_connection
+    if _db_connection is None:
+        with _db_lock:
+            if _db_connection is None:
+                _db_connection = duckdb.connect(str(DUCKDB_PATH))
+                _db_connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+                logger.info("DuckDB connection opened", extra={
+                    "path": str(DUCKDB_PATH),
+                    "memory_limit": DUCKDB_MEMORY_LIMIT,
+                })
+    return _db_connection
+
 
 @contextmanager
 def get_db_connection():
-    """Context manager for DuckDB connections."""
-    con = duckdb.connect(str(DUCKDB_PATH))
-    try:
-        yield con
-    finally:
-        con.close()
+    """Context manager for DuckDB connections. Uses a shared connection."""
+    con = _get_shared_connection()
+    yield con
 
 
 def init_duckdb():

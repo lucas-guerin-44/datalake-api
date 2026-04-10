@@ -26,9 +26,14 @@ from src.core import datalake
 
 @pytest.fixture(autouse=True)
 def use_temp_duckdb(tmp_path, monkeypatch):
-    """Use a temporary DuckDB file for each test."""
-    db_path = tmp_path / "test.duckdb"
-    monkeypatch.setattr(datalake, "DUCKDB_PATH", db_path)
+    """Use a temporary DuckDB file for each test, resetting the shared connection."""
+    if datalake._db_connection is not None:
+        try:
+            datalake._db_connection.close()
+        except Exception:
+            pass
+    monkeypatch.setattr(datalake, "_db_connection", None)
+    monkeypatch.setattr(datalake, "DUCKDB_PATH", db_path := tmp_path / "test.duckdb")
     datalake.init_duckdb()
     yield db_path
 

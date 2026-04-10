@@ -28,6 +28,7 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "datalake")
 
 # DuckDB
 DUCKDB_PATH = Path(os.getenv("DUCKDB_PATH", str(PROJECT_ROOT / "datalake" / "ohlc.duckdb")))
+DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
 
 # Default values that should be changed in production
 _DEFAULT_SECRET_KEY = "secretToken"

@@ -22,46 +22,74 @@ def _parse_ts(ts) -> datetime:
 
 
 async def _stream_rows(
-    ws: WebSocket, sql: str, params: list, speed: float, columns: list[str], max_delay: float = 10.0,
+    ws: WebSocket,
+    table: str,
+    columns: list[str],
+    conditions: list[str],
+    params: list,
+    speed: float,
+    max_delay: float = 10.0,
 ):
     """
-    Stream query results over a WebSocket, pacing sends by the real-time
-    delta between consecutive timestamps (scaled by speed multiplier).
+    Stream query results over a WebSocket using internal cursor-based
+    pagination. Each page is a small LIMIT query that returns instantly
+    (indexed lookup), so the first message goes out in milliseconds
+    regardless of total dataset size.
 
     Args:
-        max_delay: Upper bound (seconds) on the sleep between any two messages.
-                   Use a small value (e.g. 0.1) when the consumer handles its
-                   own presentation pacing and just wants fast delivery.
-                   Set to 0 for burst mode (no pacing at all).
+        table: Table name to query (tick_data or ohlc_data).
+        columns: Column names to SELECT.
+        conditions: WHERE clause fragments (joined with AND).
+        params: Bind parameters for the conditions.
+        speed: Playback speed multiplier.
+        max_delay: Upper bound (seconds) on sleep between messages (0 = burst).
 
     Each message is a JSON object with the column names as keys.
     Sends a final {"done": true} when replay is complete.
     """
+    PAGE_SIZE = 5000
     prev_ts: Optional[datetime] = None
-    BATCH_SIZE = 1000
+    last_ts = None
 
-    with get_db_connection() as con:
-        db_cursor = con.execute(sql, params)
+    while True:
+        # Build a paginated query — use cursor from previous page
+        page_conditions = list(conditions)
+        page_params = list(params)
+        if last_ts is not None:
+            page_conditions.append("timestamp > ?::TIMESTAMP")
+            page_params.append(last_ts)
 
-        while True:
-            batch = db_cursor.fetchmany(BATCH_SIZE)
-            if not batch:
-                break
+        sql = f"""
+        SELECT {', '.join(columns)}
+        FROM {table}
+        WHERE {' AND '.join(page_conditions)}
+        ORDER BY timestamp
+        LIMIT {PAGE_SIZE}
+        """
 
-            for row in batch:
-                record = dict(zip(columns, row))
+        with get_db_connection() as con:
+            rows = con.execute(sql, page_params).fetchall()
 
-                ts = _parse_ts(record["timestamp"])
-                record["timestamp"] = ts.isoformat()
+        if not rows:
+            break
 
-                # Pace by real-time delta between rows, capped by max_delay
-                if prev_ts is not None and speed > 0 and max_delay > 0:
-                    delta = (ts - prev_ts).total_seconds() / speed
-                    if delta > 0:
-                        await asyncio.sleep(min(delta, max_delay))
+        for row in rows:
+            record = dict(zip(columns, row))
 
-                prev_ts = ts
-                await ws.send_text(json.dumps(record))
+            ts = _parse_ts(record["timestamp"])
+            record["timestamp"] = ts.isoformat()
+            last_ts = ts.isoformat()
+
+            if prev_ts is not None and speed > 0 and max_delay > 0:
+                delta = (ts - prev_ts).total_seconds() / speed
+                if delta > 0:
+                    await asyncio.sleep(min(delta, max_delay))
+
+            prev_ts = ts
+            await ws.send_text(json.dumps(record))
+
+        if len(rows) < PAGE_SIZE:
+            break
 
     await ws.send_text(json.dumps({"done": True}))
 
@@ -97,15 +125,8 @@ async def stream_ticks(
             conditions.append("timestamp <= ?::TIMESTAMP")
             params.append(end)
 
-        sql = f"""
-        SELECT timestamp, price, volume, bid, ask
-        FROM tick_data
-        WHERE {' AND '.join(conditions)}
-        ORDER BY timestamp
-        """
-
         columns = ["timestamp", "price", "volume", "bid", "ask"]
-        await _stream_rows(ws, sql, params, speed, columns, max_delay)
+        await _stream_rows(ws, "tick_data", columns, conditions, params, speed, max_delay)
 
     except WebSocketDisconnect:
         logger.info("Tick stream client disconnected", extra={"instrument": instrument})
@@ -156,15 +177,8 @@ async def stream_bars(
             conditions.append("timestamp <= ?::TIMESTAMP")
             params.append(end)
 
-        sql = f"""
-        SELECT timestamp, open, high, low, close
-        FROM ohlc_data
-        WHERE {' AND '.join(conditions)}
-        ORDER BY timestamp
-        """
-
         columns = ["timestamp", "open", "high", "low", "close"]
-        await _stream_rows(ws, sql, params, speed, columns, max_delay)
+        await _stream_rows(ws, "ohlc_data", columns, conditions, params, speed, max_delay)
 
     except WebSocketDisconnect:
         logger.info("Bar stream client disconnected", extra={"instrument": instrument})

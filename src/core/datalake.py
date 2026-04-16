@@ -2,6 +2,7 @@
 DuckDB-based OHLC and tick data storage.
 All data lives in a single embedded database file.
 """
+import re
 import threading
 
 import duckdb
@@ -104,6 +105,42 @@ def list_timeframes(instrument: Optional[str] = None) -> List[str]:
         return [r[0] for r in rows]
 
 
+_TF_RE = re.compile(r"^(M|H|D|W|MN)(\d+)?$", re.IGNORECASE)
+
+
+def snap_to_canonical_bucket(series: pd.Series, timeframe: str) -> pd.Series:
+    """
+    Snap UTC timestamps to the canonical bucket boundary for the timeframe.
+
+    Different brokers stamp aggregated bars (daily / 4-hour) at different hours
+    depending on their server timezone and DST policy. Snapping to a canonical
+    UTC-anchored boundary lets the (instrument, timeframe, timestamp) PK collapse
+    offset-shifted duplicates via INSERT OR REPLACE instead of storing N copies
+    of the same logical bar.
+    """
+    tf = timeframe.upper()
+    m = _TF_RE.match(tf)
+    if not m:
+        return series
+    unit, n = m.group(1), m.group(2)
+    n = int(n) if n else 1
+
+    if unit == "M":
+        return series.dt.floor(f"{n}min")
+    if unit == "H":
+        return series.dt.floor(f"{n}h")
+    if unit == "D":
+        return series.dt.floor(f"{n}D")
+    if unit == "W":
+        # Monday-anchored ISO week
+        daily = series.dt.floor("D")
+        return daily - pd.to_timedelta(daily.dt.weekday, unit="D")
+    if unit == "MN":
+        # First day of month at 00:00, preserving tz
+        return series.dt.to_period("M").dt.start_time.dt.tz_localize(series.dt.tz)
+    return series
+
+
 def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
     """
     Upsert OHLC data — updates existing rows, inserts new ones.
@@ -124,6 +161,9 @@ def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
     insert_df["instrument"] = instrument
     insert_df["timeframe"] = timeframe
     insert_df["timestamp"] = pd.to_datetime(insert_df["timestamp"], utc=True)
+    insert_df["timestamp"] = snap_to_canonical_bucket(insert_df["timestamp"], timeframe)
+    # Collapse offset-shifted rows within the same batch before hitting the PK.
+    insert_df = insert_df.drop_duplicates(subset=["timestamp"], keep="last")
 
     with get_db_connection() as con:
         con.execute("""

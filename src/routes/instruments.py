@@ -42,6 +42,7 @@ def get_instrument_detail(
                 "min_date": str(data_range["min_date"]) if data_range["min_date"] else None,
                 "max_date": str(data_range["max_date"]) if data_range["max_date"] else None,
                 "record_count": data_range["count"],
+                "sources": data_range.get("sources", []),
             })
 
     # Include tick coverage if available
@@ -52,6 +53,7 @@ def get_instrument_detail(
             "min_date": str(tick_cov["min_date"]) if tick_cov["min_date"] else None,
             "max_date": str(tick_cov["max_date"]) if tick_cov["max_date"] else None,
             "record_count": tick_cov["count"],
+            "sources": ["raw"],
         })
 
     if not timeframes and not tick_cov:

@@ -64,3 +64,28 @@ def validate_timeframe(timeframe: str) -> str:
         )
 
     return timeframe.upper()
+
+
+# Filenames: allow only safe characters; strip path components entirely.
+FILENAME_SAFE_PATTERN = re.compile(r'[^A-Za-z0-9._\-]')
+MAX_FILENAME_LENGTH = 255
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Reduce an uploaded filename to a safe basename: no path separators, no traversal,
+    only alphanumerics / dot / underscore / hyphen. Raises HTTPException on empty result.
+    """
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    # Strip any directory components the client may have sent.
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    base = base.lstrip(".")  # reject hidden files / '..' prefixes
+
+    cleaned = FILENAME_SAFE_PATTERN.sub("_", base)[:MAX_FILENAME_LENGTH]
+
+    if not cleaned or cleaned in {".", ".."} or cleaned.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    return cleaned

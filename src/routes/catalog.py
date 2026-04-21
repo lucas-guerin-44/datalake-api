@@ -1,12 +1,15 @@
 """Catalog routes - view database statistics and data coverage."""
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 
 from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
 from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage
+from src.services.backup import export_catalog, restore_catalog, DEFAULT_BACKUP_ROOT, MANIFEST_FILENAME
+from src.services.jobs import create_job, finish_job
 from src.auth.auth import ScopedAuth
 
 logger = get_logger(__name__)
@@ -66,3 +69,72 @@ def get_stats(
     except Exception as e:
         logger.error("Failed to retrieve stats", exc_info=True)
         return {"status": "error", "message": str(e)}
+
+
+def _run_export_job(job_id: str, output_dir: Optional[str]):
+    try:
+        manifest = export_catalog(Path(output_dir) if output_dir else None)
+        finish_job(job_id, result=manifest)
+    except Exception as e:
+        logger.exception("Export job failed", extra={"job_id": job_id})
+        finish_job(job_id, error=str(e))
+
+
+def _run_restore_job(job_id: str, manifest_path: str):
+    try:
+        result = restore_catalog(Path(manifest_path))
+        finish_job(job_id, result=result)
+    except Exception as e:
+        logger.exception("Restore job failed", extra={"job_id": job_id})
+        finish_job(job_id, error=str(e))
+
+
+@router.post("/catalog/export")
+def export_catalog_api(
+    background_tasks: BackgroundTasks,
+    output_dir: Optional[str] = Form(None, description=f"Target directory. Defaults to {DEFAULT_BACKUP_ROOT}/<timestamp>/"),
+    background: bool = Form(False, description="Run as a background job and return a job id"),
+    current_user: User = Depends(ScopedAuth("write")),
+):
+    """
+    Export the entire datalake to partitioned Parquet plus a manifest.json.
+    Safe to run while the API is live (uses DuckDB's MVCC snapshot). Requires write scope.
+    """
+    if background:
+        job = create_job("catalog_export", meta={"output_dir": output_dir})
+        background_tasks.add_task(_run_export_job, job.id, output_dir)
+        return {"status": "ok", "job_id": job.id}
+
+    try:
+        manifest = export_catalog(Path(output_dir) if output_dir else None)
+        return {"status": "ok", "manifest": manifest}
+    except Exception as e:
+        logger.exception("Export failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/catalog/restore")
+def restore_catalog_api(
+    background_tasks: BackgroundTasks,
+    manifest_path: str = Form(..., description=f"Path to a manifest.json from a prior export (defaults to {MANIFEST_FILENAME} inside the export dir)"),
+    background: bool = Form(False, description="Run as a background job and return a job id"),
+    current_user: User = Depends(ScopedAuth("admin")),
+):
+    """
+    Restore (merge) a previously exported catalog into the live datalake. Existing rows
+    are overwritten by values from the backup; untouched rows stay. Requires admin scope.
+    """
+    if background:
+        job = create_job("catalog_restore", meta={"manifest_path": manifest_path})
+        background_tasks.add_task(_run_restore_job, job.id, manifest_path)
+        return {"status": "ok", "job_id": job.id}
+
+    try:
+        return restore_catalog(Path(manifest_path))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Restore failed")
+        raise HTTPException(status_code=500, detail=str(e))

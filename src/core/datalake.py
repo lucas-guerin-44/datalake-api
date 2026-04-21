@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from src.middleware.logging_config import get_logger
 from src.services.validators import validate_instrument, validate_timeframe
 from src.config import DUCKDB_PATH, DUCKDB_MEMORY_LIMIT
+from src.core.migrations import run_migrations
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,30 @@ def get_db_connection():
     yield con
 
 
+# Serializes all write transactions so BEGIN/COMMIT on the shared connection is safe.
+# DuckDB already single-writes at the file level; this just makes it explicit at the
+# Python layer and prevents two concurrent requests from interleaving statements inside
+# each other's transactions.
+_write_tx_lock = threading.Lock()
+
+
+@contextmanager
+def write_transaction():
+    """
+    Wrap a group of writes in an atomic transaction. Rolls back on any exception
+    so ingest + derive can't leave the datalake half-written.
+    """
+    with _write_tx_lock:
+        con = _get_shared_connection()
+        con.execute("BEGIN TRANSACTION")
+        try:
+            yield con
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+
 def init_duckdb():
     """Create the ohlc_data and tick_data tables and indexes if they don't exist."""
     with get_db_connection() as con:
@@ -58,10 +83,17 @@ def init_duckdb():
                 high DOUBLE NOT NULL,
                 low DOUBLE NOT NULL,
                 close DOUBLE NOT NULL,
+                source VARCHAR NOT NULL DEFAULT 'raw',
                 PRIMARY KEY (instrument, timeframe, timestamp)
             )
         """)
+        # Legacy DBs predate the PRIMARY KEY in CREATE TABLE and rely on this named
+        # unique index for their only uniqueness guarantee. Keep it — INSERT paths use
+        # explicit ON CONFLICT targets, so having both this and a PK is harmless.
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlc_pk ON ohlc_data(instrument, timeframe, timestamp)")
+
+        # Apply any pending schema migrations.
+        run_migrations(con)
         con.execute("CREATE INDEX IF NOT EXISTS idx_instrument_timeframe ON ohlc_data(instrument, timeframe)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON ohlc_data(timestamp)")
 
@@ -141,7 +173,7 @@ def snap_to_canonical_bucket(series: pd.Series, timeframe: str) -> pd.Series:
     return series
 
 
-def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
+def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str, source: str = "raw") -> int:
     """
     Upsert OHLC data — updates existing rows, inserts new ones.
     Returns the number of rows affected.
@@ -160,6 +192,7 @@ def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
     insert_df = df[required].copy()
     insert_df["instrument"] = instrument
     insert_df["timeframe"] = timeframe
+    insert_df["source"] = source
     insert_df["timestamp"] = pd.to_datetime(insert_df["timestamp"], utc=True)
     insert_df["timestamp"] = snap_to_canonical_bucket(insert_df["timestamp"], timeframe)
     # Collapse offset-shifted rows within the same batch before hitting the PK.
@@ -167,13 +200,193 @@ def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
 
     with get_db_connection() as con:
         con.execute("""
-            INSERT OR REPLACE INTO ohlc_data
-            (instrument, timeframe, timestamp, open, high, low, close)
-            SELECT instrument, timeframe, timestamp, open, high, low, close
+            INSERT INTO ohlc_data
+            (instrument, timeframe, timestamp, open, high, low, close, source)
+            SELECT instrument, timeframe, timestamp, open, high, low, close, source
             FROM insert_df
+            ON CONFLICT (instrument, timeframe, timestamp) DO UPDATE SET
+                open = excluded.open,
+                high = excluded.high,
+                low  = excluded.low,
+                close = excluded.close,
+                source = excluded.source
         """)
 
     return len(insert_df)
+
+
+# --- Timeframe derivation ---
+
+# Canonical target timeframes for auto-derivation. W1/MN1 deliberately excluded —
+# their bucket alignment is calendar-dependent and better handled by re-export.
+DERIVATION_TARGETS = ["M5", "M15", "M30", "H1", "H4", "D1"]
+
+_TF_SECONDS = {
+    "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+    "H1": 3600, "H4": 14400, "D1": 86400,
+}
+
+_TF_INTERVAL = {
+    "M1": "1 minute", "M5": "5 minutes", "M15": "15 minutes", "M30": "30 minutes",
+    "H1": "1 hour", "H4": "4 hours", "D1": "1 day",
+}
+
+
+def _derivation_targets_for(source_seconds: int):
+    for tf in DERIVATION_TARGETS:
+        tgt = _TF_SECONDS[tf]
+        if tgt > source_seconds and tgt % source_seconds == 0:
+            yield tf, _TF_INTERVAL[tf]
+
+
+def _pad_window_to_day(start, end):
+    """Expand [start, end] outwards to UTC day boundaries so day-sized buckets are complete."""
+    s = pd.Timestamp(start)
+    e = pd.Timestamp(end)
+    if s.tz is None:
+        s = s.tz_localize("UTC")
+    else:
+        s = s.tz_convert("UTC")
+    if e.tz is None:
+        e = e.tz_localize("UTC")
+    else:
+        e = e.tz_convert("UTC")
+    return s.floor("D"), (e.ceil("D") if e != e.floor("D") else e + pd.Timedelta(days=1))
+
+
+def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -> dict:
+    """
+    Rebuild derived OHLC bars for all target timeframes larger than source_timeframe,
+    covering [start, end] (inclusive on start, exclusive on end after padding).
+    Idempotent via INSERT OR REPLACE. Never clobbers existing source='raw' rows.
+    Returns {target_tf: rows_written}.
+    """
+    instrument = validate_instrument(instrument)
+    source_timeframe = validate_timeframe(source_timeframe)
+
+    src_sec = _TF_SECONDS.get(source_timeframe)
+    if src_sec is None:
+        return {}
+
+    start_utc, end_utc = _pad_window_to_day(start, end)
+    results: dict = {}
+
+    with get_db_connection() as con:
+        for target, interval in _derivation_targets_for(src_sec):
+            sql = f"""
+                INSERT INTO ohlc_data
+                (instrument, timeframe, timestamp, open, high, low, close, source)
+                SELECT * FROM (
+                    SELECT
+                        instrument,
+                        ? AS timeframe,
+                        time_bucket(INTERVAL '{interval}', timestamp) AS timestamp,
+                        arg_min(open, timestamp) AS open,
+                        max(high) AS high,
+                        min(low) AS low,
+                        arg_max(close, timestamp) AS close,
+                        'derived' AS source
+                    FROM ohlc_data
+                    WHERE instrument = ?
+                      AND timeframe = ?
+                      AND timestamp >= ?
+                      AND timestamp < ?
+                    GROUP BY instrument, time_bucket(INTERVAL '{interval}', timestamp)
+                ) derived_bars
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ohlc_data existing
+                    WHERE existing.instrument = derived_bars.instrument
+                      AND existing.timeframe = derived_bars.timeframe
+                      AND existing.timestamp = derived_bars.timestamp
+                      AND existing.source = 'raw'
+                )
+                ON CONFLICT (instrument, timeframe, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low  = excluded.low,
+                    close = excluded.close,
+                    source = excluded.source
+            """
+            con.execute(sql, [target, instrument, source_timeframe, start_utc, end_utc])
+            cnt = con.execute(
+                """SELECT COUNT(*) FROM ohlc_data
+                   WHERE instrument=? AND timeframe=? AND source='derived'
+                     AND timestamp >= ? AND timestamp < ?""",
+                [instrument, target, start_utc, end_utc],
+            ).fetchone()[0]
+            results[target] = cnt
+
+    if results:
+        logger.info("Derived OHLC timeframes", extra={
+            "instrument": instrument,
+            "source_timeframe": source_timeframe,
+            "targets": results,
+        })
+    return results
+
+
+def derive_ohlc_from_ticks(instrument: str, start, end) -> dict:
+    """
+    Build OHLC bars from tick data for all canonical timeframes, covering [start, end].
+    Idempotent via INSERT OR REPLACE. Never clobbers existing source='raw' rows.
+    Returns {target_tf: rows_written}.
+    """
+    instrument = validate_instrument(instrument)
+    start_utc, end_utc = _pad_window_to_day(start, end)
+    results: dict = {}
+
+    tick_targets = ["M1"] + DERIVATION_TARGETS
+    with get_db_connection() as con:
+        for target in tick_targets:
+            interval = _TF_INTERVAL[target]
+            sql = f"""
+                INSERT INTO ohlc_data
+                (instrument, timeframe, timestamp, open, high, low, close, source)
+                SELECT * FROM (
+                    SELECT
+                        instrument,
+                        ? AS timeframe,
+                        time_bucket(INTERVAL '{interval}', timestamp) AS timestamp,
+                        arg_min(price, timestamp) AS open,
+                        max(price) AS high,
+                        min(price) AS low,
+                        arg_max(price, timestamp) AS close,
+                        'derived' AS source
+                    FROM tick_data
+                    WHERE instrument = ?
+                      AND timestamp >= ?
+                      AND timestamp < ?
+                    GROUP BY instrument, time_bucket(INTERVAL '{interval}', timestamp)
+                ) derived_bars
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ohlc_data existing
+                    WHERE existing.instrument = derived_bars.instrument
+                      AND existing.timeframe = derived_bars.timeframe
+                      AND existing.timestamp = derived_bars.timestamp
+                      AND existing.source = 'raw'
+                )
+                ON CONFLICT (instrument, timeframe, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low  = excluded.low,
+                    close = excluded.close,
+                    source = excluded.source
+            """
+            con.execute(sql, [target, instrument, start_utc, end_utc])
+            cnt = con.execute(
+                """SELECT COUNT(*) FROM ohlc_data
+                   WHERE instrument=? AND timeframe=? AND source='derived'
+                     AND timestamp >= ? AND timestamp < ?""",
+                [instrument, target, start_utc, end_utc],
+            ).fetchone()[0]
+            results[target] = cnt
+
+    if results:
+        logger.info("Derived OHLC from ticks", extra={
+            "instrument": instrument,
+            "targets": results,
+        })
+    return results
 
 
 def get_data_range(instrument: str, timeframe: str) -> Optional[dict]:
@@ -183,13 +396,18 @@ def get_data_range(instrument: str, timeframe: str) -> Optional[dict]:
 
     with get_db_connection() as con:
         result = con.execute("""
-            SELECT MIN(timestamp), MAX(timestamp), COUNT(*)
+            SELECT MIN(timestamp), MAX(timestamp), COUNT(*), list(DISTINCT source)
             FROM ohlc_data
             WHERE instrument = ? AND timeframe = ?
         """, [instrument, timeframe]).fetchone()
 
     if result and result[2] > 0:
-        return {"min_date": result[0], "max_date": result[1], "count": result[2]}
+        return {
+            "min_date": result[0],
+            "max_date": result[1],
+            "count": result[2],
+            "sources": sorted(result[3] or []),
+        }
     return None
 
 

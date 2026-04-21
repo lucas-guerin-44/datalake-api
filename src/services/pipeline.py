@@ -9,7 +9,14 @@ import pandas as pd
 
 from src.middleware.logging_config import get_logger
 from src.services.validators import validate_instrument, validate_timeframe
-from src.core.datalake import upsert_ohlc_data, upsert_tick_data, init_duckdb
+from src.core.datalake import (
+    upsert_ohlc_data,
+    upsert_tick_data,
+    init_duckdb,
+    derive_ohlc_timeframes,
+    derive_ohlc_from_ticks,
+    write_transaction,
+)
 
 logger = get_logger(__name__)
 
@@ -88,10 +95,11 @@ def parse_filename_meta(path: Path):
     return parts[0], parts[1]
 
 
-def ingest_single_file(file: Path, instrument: str, timeframe: str) -> int:
+def ingest_single_file(file: Path, instrument: str, timeframe: str, derive: bool = True) -> int:
     """
     Ingest a single CSV/Excel file into DuckDB.
 
+    If `derive=True`, automatically materialize higher timeframes from the ingested window.
     Returns the number of rows inserted.
     """
     instrument = validate_instrument(instrument)
@@ -102,13 +110,17 @@ def ingest_single_file(file: Path, instrument: str, timeframe: str) -> int:
     init_duckdb()
     raw = _read_raw(file)
     df = _standardize(raw)
-    rows_inserted = upsert_ohlc_data(df, instrument, timeframe)
+
+    with write_transaction():
+        rows_inserted = upsert_ohlc_data(df, instrument, timeframe)
+        if derive and not df.empty:
+            derive_ohlc_timeframes(instrument, timeframe, df["timestamp"].min(), df["timestamp"].max())
 
     logger.info("File ingestion completed", extra={"file": str(file), "instrument": instrument, "timeframe": timeframe, "rows_inserted": rows_inserted})
     return rows_inserted
 
 
-def ingest_dataframe(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
+def ingest_dataframe(df: pd.DataFrame, instrument: str, timeframe: str, derive: bool = True) -> int:
     """
     Ingest a DataFrame directly into DuckDB.
     Must have a 'timestamp' column plus open/high/low/close.
@@ -120,7 +132,14 @@ def ingest_dataframe(df: pd.DataFrame, instrument: str, timeframe: str) -> int:
     if "timestamp" not in df.columns:
         raise ValueError("DataFrame must have a 'timestamp' column")
 
-    return upsert_ohlc_data(_standardize(df.copy()), instrument, timeframe)
+    standardized = _standardize(df.copy())
+
+    with write_transaction():
+        rows = upsert_ohlc_data(standardized, instrument, timeframe)
+        if derive and not standardized.empty:
+            derive_ohlc_timeframes(instrument, timeframe, standardized["timestamp"].min(), standardized["timestamp"].max())
+
+    return rows
 
 
 # --- Tick data pipeline ---
@@ -217,7 +236,7 @@ def standardize_tick_csv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def ingest_tick_file(file: Path, instrument: str) -> int:
+def ingest_tick_file(file: Path, instrument: str, derive: bool = True) -> int:
     """Ingest a single tick CSV file into DuckDB. Returns the number of rows inserted."""
     instrument = validate_instrument(instrument)
 
@@ -226,13 +245,17 @@ def ingest_tick_file(file: Path, instrument: str) -> int:
     init_duckdb()
     raw = _read_raw_tick(file)
     df = standardize_tick_csv(raw)
-    rows_inserted = upsert_tick_data(df, instrument)
+
+    with write_transaction():
+        rows_inserted = upsert_tick_data(df, instrument)
+        if derive and not df.empty:
+            derive_ohlc_from_ticks(instrument, df["timestamp"].min(), df["timestamp"].max())
 
     logger.info("Tick file ingestion completed", extra={"file": str(file), "instrument": instrument, "rows_inserted": rows_inserted})
     return rows_inserted
 
 
-def ingest_tick_dataframe(df: pd.DataFrame, instrument: str) -> int:
+def ingest_tick_dataframe(df: pd.DataFrame, instrument: str, derive: bool = True) -> int:
     """Ingest a tick DataFrame directly into DuckDB."""
     instrument = validate_instrument(instrument)
     init_duckdb()
@@ -240,4 +263,11 @@ def ingest_tick_dataframe(df: pd.DataFrame, instrument: str) -> int:
     if "timestamp" not in df.columns:
         raise ValueError("DataFrame must have a 'timestamp' column")
 
-    return upsert_tick_data(standardize_tick_csv(df.copy()), instrument)
+    standardized = standardize_tick_csv(df.copy())
+
+    with write_transaction():
+        rows = upsert_tick_data(standardized, instrument)
+        if derive and not standardized.empty:
+            derive_ohlc_from_ticks(instrument, standardized["timestamp"].min(), standardized["timestamp"].max())
+
+    return rows

@@ -2,6 +2,7 @@
 Data ingestion pipeline for OHLC and tick data.
 Reads CSV/Excel files and inserts data into DuckDB.
 """
+import time
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -16,7 +17,28 @@ from src.core.datalake import (
     derive_ohlc_timeframes,
     derive_ohlc_from_ticks,
     write_transaction,
+    get_db_connection,
 )
+
+
+def _count_existing_ohlc(instrument: str, timeframe: str, start, end) -> int:
+    with get_db_connection() as con:
+        return con.execute(
+            """SELECT COUNT(*) FROM ohlc_data
+               WHERE instrument = ? AND timeframe = ?
+                 AND timestamp >= ? AND timestamp <= ?""",
+            [instrument, timeframe, start, end],
+        ).fetchone()[0]
+
+
+def _count_existing_ticks(instrument: str, start, end) -> int:
+    with get_db_connection() as con:
+        return con.execute(
+            """SELECT COUNT(*) FROM tick_data
+               WHERE instrument = ?
+                 AND timestamp >= ? AND timestamp <= ?""",
+            [instrument, start, end],
+        ).fetchone()[0]
 
 logger = get_logger(__name__)
 
@@ -107,16 +129,51 @@ def ingest_single_file(file: Path, instrument: str, timeframe: str, derive: bool
 
     logger.info("Starting file ingestion", extra={"file": str(file), "instrument": instrument, "timeframe": timeframe})
 
+    t_total = time.perf_counter()
     init_duckdb()
+
+    t_read = time.perf_counter()
     raw = _read_raw(file)
     df = _standardize(raw)
+    ms_read = int((time.perf_counter() - t_read) * 1000)
+
+    rows_in_file = len(df)
+    rows_matched = 0
+    derive_result: Dict = {}
+    ms_upsert = ms_derive = 0
+
+    if rows_in_file > 0:
+        win_start, win_end = df["timestamp"].min(), df["timestamp"].max()
+        rows_matched = _count_existing_ohlc(instrument, timeframe, win_start, win_end)
 
     with write_transaction():
+        t_upsert = time.perf_counter()
         rows_inserted = upsert_ohlc_data(df, instrument, timeframe)
-        if derive and not df.empty:
-            derive_ohlc_timeframes(instrument, timeframe, df["timestamp"].min(), df["timestamp"].max())
+        ms_upsert = int((time.perf_counter() - t_upsert) * 1000)
 
-    logger.info("File ingestion completed", extra={"file": str(file), "instrument": instrument, "timeframe": timeframe, "rows_inserted": rows_inserted})
+        if derive and not df.empty:
+            t_derive = time.perf_counter()
+            derive_result = derive_ohlc_timeframes(instrument, timeframe, df["timestamp"].min(), df["timestamp"].max())
+            ms_derive = int((time.perf_counter() - t_derive) * 1000)
+
+    after = _count_existing_ohlc(instrument, timeframe, df["timestamp"].min(), df["timestamp"].max()) if rows_in_file > 0 else 0
+    rows_new = max(0, after - rows_matched)
+
+    logger.info("File ingestion completed", extra={
+        "file": str(file),
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "rows_in_file": rows_in_file,
+        "rows_new": rows_new,
+        "rows_matched": max(0, rows_inserted - rows_new),
+        "derived_targets": derive_result,
+        "timing_ms": {
+            "read": ms_read,
+            "upsert": ms_upsert,
+            "derive": ms_derive,
+            "total": int((time.perf_counter() - t_total) * 1000),
+        },
+    })
     return rows_inserted
 
 
@@ -242,16 +299,50 @@ def ingest_tick_file(file: Path, instrument: str, derive: bool = True) -> int:
 
     logger.info("Starting tick file ingestion", extra={"file": str(file), "instrument": instrument})
 
+    t_total = time.perf_counter()
     init_duckdb()
+
+    t_read = time.perf_counter()
     raw = _read_raw_tick(file)
     df = standardize_tick_csv(raw)
+    ms_read = int((time.perf_counter() - t_read) * 1000)
+
+    rows_in_file = len(df)
+    rows_matched = 0
+    derive_result: Dict = {}
+    ms_upsert = ms_derive = 0
+
+    if rows_in_file > 0:
+        win_start, win_end = df["timestamp"].min(), df["timestamp"].max()
+        rows_matched = _count_existing_ticks(instrument, win_start, win_end)
 
     with write_transaction():
+        t_upsert = time.perf_counter()
         rows_inserted = upsert_tick_data(df, instrument)
-        if derive and not df.empty:
-            derive_ohlc_from_ticks(instrument, df["timestamp"].min(), df["timestamp"].max())
+        ms_upsert = int((time.perf_counter() - t_upsert) * 1000)
 
-    logger.info("Tick file ingestion completed", extra={"file": str(file), "instrument": instrument, "rows_inserted": rows_inserted})
+        if derive and not df.empty:
+            t_derive = time.perf_counter()
+            derive_result = derive_ohlc_from_ticks(instrument, df["timestamp"].min(), df["timestamp"].max())
+            ms_derive = int((time.perf_counter() - t_derive) * 1000)
+
+    after = _count_existing_ticks(instrument, df["timestamp"].min(), df["timestamp"].max()) if rows_in_file > 0 else 0
+    rows_new = max(0, after - rows_matched)
+
+    logger.info("Tick file ingestion completed", extra={
+        "file": str(file),
+        "instrument": instrument,
+        "rows_in_file": rows_in_file,
+        "rows_new": rows_new,
+        "rows_matched": max(0, rows_inserted - rows_new),
+        "derived_targets": derive_result,
+        "timing_ms": {
+            "read": ms_read,
+            "upsert": ms_upsert,
+            "derive": ms_derive,
+            "total": int((time.perf_counter() - t_total) * 1000),
+        },
+    })
     return rows_inserted
 
 

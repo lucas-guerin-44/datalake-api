@@ -7,7 +7,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
-from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage
+from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps
+from src.services.validators import validate_instrument, validate_timeframe
+from fastapi import Query
 from src.services.backup import export_catalog, restore_catalog, DEFAULT_BACKUP_ROOT, MANIFEST_FILENAME
 from src.services.jobs import create_job, finish_job
 from src.auth.auth import ScopedAuth
@@ -87,6 +89,40 @@ def _run_restore_job(job_id: str, manifest_path: str):
     except Exception as e:
         logger.exception("Restore job failed", extra={"job_id": job_id})
         finish_job(job_id, error=str(e))
+
+
+@router.get("/catalog/gaps")
+def get_catalog_gaps(
+    instrument: str = Query(..., description="Instrument symbol"),
+    timeframe: str = Query(..., description="Timeframe (M1, M5, H1, ...)"),
+    start: Optional[str] = Query(None, description="Inclusive start timestamp (ISO-8601)"),
+    end: Optional[str] = Query(None, description="Exclusive end timestamp (ISO-8601)"),
+    min_gap_seconds: Optional[int] = Query(None, description="Only report gaps longer than this (default: 2× bar duration)"),
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+):
+    """
+    Locate unusually-large gaps in an OHLC series. Each entry is flagged
+    `is_weekend=true` if it matches the typical FX weekend closure pattern —
+    filter those client-side if you only want real data holes.
+    """
+    instrument = validate_instrument(instrument)
+    timeframe = validate_timeframe(timeframe)
+    gaps = find_gaps(instrument, timeframe, start, end, min_gap_seconds, limit)
+    return {
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "threshold_seconds": min_gap_seconds,
+        "gap_count": len(gaps),
+        "gaps": [
+            {
+                **g,
+                "gap_start": g["gap_start"].isoformat() if g["gap_start"] else None,
+                "gap_end": g["gap_end"].isoformat() if g["gap_end"] else None,
+            }
+            for g in gaps
+        ],
+    }
 
 
 @router.post("/catalog/export")

@@ -325,6 +325,74 @@ def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -
     return results
 
 
+def find_gaps(
+    instrument: str,
+    timeframe: str,
+    start=None,
+    end=None,
+    min_gap_seconds: Optional[int] = None,
+    limit: int = 100,
+) -> List[dict]:
+    """
+    Locate unusually-large gaps between consecutive bars in `ohlc_data`.
+
+    Returns entries like {gap_start, gap_end, duration_seconds, missing_bars, is_weekend}
+    sorted by duration descending. The default threshold flags any gap > 2× the bar size.
+    """
+    instrument = validate_instrument(instrument)
+    timeframe = validate_timeframe(timeframe)
+
+    tf_sec = _TF_SECONDS.get(timeframe)
+    if tf_sec is None:
+        # W1/MN1/TICK — gap semantics don't apply cleanly.
+        return []
+
+    threshold = int(min_gap_seconds) if min_gap_seconds is not None else tf_sec * 2
+
+    params = [instrument, timeframe, start, start, end, end, threshold, int(limit)]
+    sql = """
+        WITH ordered AS (
+            SELECT timestamp,
+                   LAG(timestamp) OVER (ORDER BY timestamp) AS prev_ts
+            FROM ohlc_data
+            WHERE instrument = ?
+              AND timeframe = ?
+              AND (? IS NULL OR timestamp >= ?)
+              AND (? IS NULL OR timestamp < ?)
+        )
+        SELECT prev_ts AS gap_start,
+               timestamp AS gap_end,
+               EXTRACT(EPOCH FROM (timestamp - prev_ts)) AS duration_seconds
+        FROM ordered
+        WHERE prev_ts IS NOT NULL
+          AND EXTRACT(EPOCH FROM (timestamp - prev_ts)) > ?
+        ORDER BY duration_seconds DESC
+        LIMIT ?
+    """
+    with get_db_connection() as con:
+        rows = con.execute(sql, params).fetchall()
+
+    result = []
+    for gap_start, gap_end, duration_seconds in rows:
+        duration_seconds = int(duration_seconds)
+        missing_bars = max(0, (duration_seconds // tf_sec) - 1)
+        # Weekend heuristic: gap begins late Fri UTC and ends before ~Mon 00:00,
+        # with duration in the 36h..75h window typical of FX market close.
+        is_weekend = False
+        if gap_start is not None:
+            weekday = gap_start.weekday()  # Mon=0 .. Sun=6
+            if weekday in (4, 5) and 36 * 3600 <= duration_seconds <= 75 * 3600:
+                is_weekend = True
+        result.append({
+            "gap_start": gap_start,
+            "gap_end": gap_end,
+            "duration_seconds": duration_seconds,
+            "missing_bars": int(missing_bars),
+            "is_weekend": is_weekend,
+        })
+    return result
+
+
 def derive_ohlc_from_ticks(instrument: str, start, end) -> dict:
     """
     Build OHLC bars from tick data for all canonical timeframes, covering [start, end].

@@ -195,6 +195,10 @@ def upsert_ohlc_data(df: pd.DataFrame, instrument: str, timeframe: str, source: 
     insert_df["source"] = source
     insert_df["timestamp"] = pd.to_datetime(insert_df["timestamp"], utc=True)
     insert_df["timestamp"] = snap_to_canonical_bucket(insert_df["timestamp"], timeframe)
+    # DuckDB's TIMESTAMP column is naive; inserting tz-aware values silently
+    # converts to the host's local tz. Strip tz while keeping UTC wall-clock so
+    # stored values are canonical UTC regardless of where the API runs.
+    insert_df["timestamp"] = insert_df["timestamp"].dt.tz_localize(None)
     # Collapse offset-shifted rows within the same batch before hitting the PK.
     insert_df = insert_df.drop_duplicates(subset=["timestamp"], keep="last")
 
@@ -240,7 +244,10 @@ def _derivation_targets_for(source_seconds: int):
 
 
 def _pad_window_to_day(start, end):
-    """Expand [start, end] outwards to UTC day boundaries so day-sized buckets are complete."""
+    """
+    Expand [start, end) outwards to UTC day boundaries so day-sized buckets are complete.
+    Returns naive-UTC timestamps to match DuckDB's TIMESTAMP column type.
+    """
     s = pd.Timestamp(start)
     e = pd.Timestamp(end)
     if s.tz is None:
@@ -251,7 +258,9 @@ def _pad_window_to_day(start, end):
         e = e.tz_localize("UTC")
     else:
         e = e.tz_convert("UTC")
-    return s.floor("D"), (e.ceil("D") if e != e.floor("D") else e + pd.Timedelta(days=1))
+    s = s.floor("D")
+    e = e.ceil("D") if e != e.floor("D") else e + pd.Timedelta(days=1)
+    return s.tz_localize(None), e.tz_localize(None)
 
 
 def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -> dict:
@@ -323,6 +332,139 @@ def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -
             "targets": results,
         })
     return results
+
+
+def shift_timestamps_to_utc(source_timezone: str) -> dict:
+    """
+    One-shot data fix: re-interpret existing `ohlc_data` and `tick_data` timestamps
+    as being in `source_timezone`, shift them to UTC wall-clock, and store naive.
+
+    Uses a temp-table + GROUP BY approach so that collisions (two original rows
+    shifting to the same final PK — typical of mixed pre/post-UTC-fix state) are
+    deduplicated deterministically, keeping the row whose ORIGINAL timestamp was
+    latest. Reports how many rows were dropped to dedup — non-zero means your DB
+    had inconsistent timezone state. Take a backup before running.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(source_timezone)  # raises on invalid tz name
+    except Exception as e:
+        raise ValueError(f"Invalid timezone '{source_timezone}': {e}")
+
+    # ZoneInfo validation above makes string interpolation safe here.
+    shift_expr = (
+        f"CAST(timestamp AT TIME ZONE '{source_timezone}' AT TIME ZONE 'UTC' AS TIMESTAMP)"
+    )
+
+    # Hold the write lock for the whole migration, but commit per batch so DuckDB
+    # can free MVCC state between pairs. NOT atomic across batches — a crash
+    # mid-run leaves earlier pairs migrated, later pairs untouched. TAKE A BACKUP.
+    with _write_tx_lock:
+        con = _get_shared_connection()
+        original_limit = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        con.execute("SET memory_limit='8GB'")
+        con.execute("SET preserve_insertion_order=false")
+
+        try:
+            # OHLC: per (instrument, timeframe)
+            before_ohlc = con.execute("SELECT COUNT(*) FROM ohlc_data").fetchone()[0]
+            pairs = con.execute(
+                "SELECT DISTINCT instrument, timeframe FROM ohlc_data"
+            ).fetchall()
+            after_ohlc = 0
+            for instrument_val, timeframe_val in pairs:
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute(f"""
+                        CREATE TEMP TABLE _ohlc_batch AS
+                        SELECT instrument, timeframe, new_ts AS timestamp,
+                               arg_max(open, orig_ts)   AS open,
+                               arg_max(high, orig_ts)   AS high,
+                               arg_max(low,  orig_ts)   AS low,
+                               arg_max(close, orig_ts)  AS close,
+                               arg_max(source, orig_ts) AS source
+                        FROM (
+                            SELECT *, timestamp AS orig_ts, {shift_expr} AS new_ts
+                            FROM ohlc_data
+                            WHERE instrument = ? AND timeframe = ?
+                        )
+                        GROUP BY instrument, timeframe, new_ts
+                    """, [instrument_val, timeframe_val])
+                    batch_after = con.execute("SELECT COUNT(*) FROM _ohlc_batch").fetchone()[0]
+                    con.execute(
+                        "DELETE FROM ohlc_data WHERE instrument = ? AND timeframe = ?",
+                        [instrument_val, timeframe_val],
+                    )
+                    con.execute("INSERT INTO ohlc_data SELECT * FROM _ohlc_batch")
+                    con.execute("DROP TABLE _ohlc_batch")
+                    con.execute("COMMIT")
+                    after_ohlc += batch_after
+                    logger.info("Migrated OHLC batch", extra={
+                        "instrument": instrument_val, "timeframe": timeframe_val,
+                        "rows_after": batch_after,
+                    })
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+
+            # Ticks: per instrument
+            before_ticks = con.execute("SELECT COUNT(*) FROM tick_data").fetchone()[0]
+            tick_instruments = con.execute(
+                "SELECT DISTINCT instrument FROM tick_data"
+            ).fetchall()
+            after_ticks = 0
+            for (instrument_val,) in tick_instruments:
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute(f"""
+                        CREATE TEMP TABLE _ticks_batch AS
+                        SELECT instrument, new_ts AS timestamp,
+                               arg_max(price,  orig_ts) AS price,
+                               arg_max(volume, orig_ts) AS volume,
+                               arg_max(bid,    orig_ts) AS bid,
+                               arg_max(ask,    orig_ts) AS ask
+                        FROM (
+                            SELECT *, timestamp AS orig_ts, {shift_expr} AS new_ts
+                            FROM tick_data
+                            WHERE instrument = ?
+                        )
+                        GROUP BY instrument, new_ts
+                    """, [instrument_val])
+                    batch_after = con.execute("SELECT COUNT(*) FROM _ticks_batch").fetchone()[0]
+                    con.execute(
+                        "DELETE FROM tick_data WHERE instrument = ?",
+                        [instrument_val],
+                    )
+                    con.execute("INSERT INTO tick_data SELECT * FROM _ticks_batch")
+                    con.execute("DROP TABLE _ticks_batch")
+                    con.execute("COMMIT")
+                    after_ticks += batch_after
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+        finally:
+            # Try to restore the original memory cap — but if DuckDB has allocated
+            # past the default, lowering the limit can itself throw. Don't let
+            # cleanup mask migration success; leave the limit elevated until the
+            # next API restart.
+            try:
+                con.execute(f"SET memory_limit='{original_limit}'")
+            except Exception as cleanup_err:
+                logger.warning(
+                    "Could not restore memory_limit after migration; stays elevated until restart",
+                    extra={"error": str(cleanup_err), "elevated_limit": "8GB"},
+                )
+
+    result = {
+        "ohlc_rows_before": before_ohlc,
+        "ohlc_rows_after": after_ohlc,
+        "ohlc_rows_deduplicated": before_ohlc - after_ohlc,
+        "tick_rows_before": before_ticks,
+        "tick_rows_after": after_ticks,
+        "tick_rows_deduplicated": before_ticks - after_ticks,
+    }
+    logger.info("Shifted timestamps to UTC", extra={"source_timezone": source_timezone, **result})
+    return result
 
 
 def find_gaps(
@@ -534,6 +676,8 @@ def upsert_tick_data(df: pd.DataFrame, instrument: str) -> int:
     insert_df = df[cols].copy()
     insert_df["instrument"] = instrument
     insert_df["timestamp"] = pd.to_datetime(insert_df["timestamp"], utc=True)
+    # Store as naive UTC (see upsert_ohlc_data for rationale).
+    insert_df["timestamp"] = insert_df["timestamp"].dt.tz_localize(None)
 
     # Fill missing optional columns with defaults
     if "volume" not in insert_df.columns:

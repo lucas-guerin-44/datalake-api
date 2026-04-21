@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
-from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps
+from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps, shift_timestamps_to_utc
 from src.services.validators import validate_instrument, validate_timeframe
 from fastapi import Query
 from src.services.backup import export_catalog, restore_catalog, DEFAULT_BACKUP_ROOT, MANIFEST_FILENAME
@@ -123,6 +123,27 @@ def get_catalog_gaps(
             for g in gaps
         ],
     }
+
+
+@router.post("/catalog/migrate-timezone")
+def migrate_timezone_api(
+    source_timezone: str = Form(..., description="IANA timezone name (e.g. 'Europe/Berlin') that existing timestamps are assumed to be in"),
+    current_user: User = Depends(ScopedAuth("admin")),
+):
+    """
+    ONE-SHOT DATA FIX. Re-interpret every stored timestamp as being in
+    `source_timezone`, then shift to UTC and store naive. Run exactly once, on
+    databases ingested before UTC-storage was enforced. Admin scope required —
+    this rewrites every row.
+    """
+    try:
+        result = shift_timestamps_to_utc(source_timezone)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Timezone migration failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/catalog/export")

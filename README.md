@@ -51,7 +51,7 @@ Export OHLC data from your trading platform as CSV with columns: `timestamp`, `o
 ```bash
 # Single file — ingests + auto-derives higher timeframes (M5, M15, M30, H1, H4, D1)
 curl -X POST http://localhost:8000/ingest \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -F "file=@XAUUSD_M1_20240101_20241231.csv" \
   -F "instrument=XAUUSD" \
   -F "timeframe=M1"
@@ -66,7 +66,7 @@ curl -X POST http://localhost:8000/ingest \
 
 # Batch: place files in staging/ as {INSTRUMENT}_{TIMEFRAME}_*.csv
 curl -X POST http://localhost:8000/ingest-batch \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 **Pro tip:** ingest the finest timeframe you have (M1, or ticks) and let derivation populate everything else. One upload → all timeframes.
@@ -80,13 +80,13 @@ Tick ingest also auto-derives the full OHLC ladder (M1 through D1).
 ```bash
 # Single file
 curl -X POST http://localhost:8000/ingest/ticks \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -F "file=@XAUUSD_ticks_202401.csv" \
   -F "instrument=XAUUSD"
 
 # Batch: place files in staging/ as {INSTRUMENT}_TICK_*.csv
 curl -X POST http://localhost:8000/ingest-batch/ticks \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### Ingest observability
@@ -184,8 +184,7 @@ Returns unusually-large gaps (> 2× the bar size by default) so you can spot mis
 
 ```bash
 cp .env.example .env
-# Change SECRET_KEY:
-# python -c "import secrets; print(secrets.token_urlsafe(32))"
+# Optional: set POSTGRES_PASSWORD to something non-default for real deployments.
 ```
 
 ### 2. Start
@@ -195,21 +194,27 @@ docker compose up -d
 # or: make up
 ```
 
-### 3. Register and get a token
+### 3. Create a user and mint an API key
+
+There is no HTTP registration or login flow. Users and keys are provisioned through the container:
 
 ```bash
-curl -X POST http://localhost:8000/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "email": "admin@example.com", "password": "your-password"}'
+# Seed a user (password is random + discarded — API keys are the only credential)
+docker compose exec -T api python - <<'EOF'
+import secrets
+from src.core.database import get_db_context, create_user, get_user_by_username
+from src.auth.auth import get_password_hash
+with get_db_context() as db:
+    if not get_user_by_username(db, "admin"):
+        create_user(db, "admin", "admin@example.com", get_password_hash(secrets.token_urlsafe(32)))
+EOF
 
-curl -X POST http://localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "your-password"}'
-
-export TOKEN="eyJ..."
+# Mint a long-lived admin key — printed once, copy it into a password manager
+docker compose exec api python -m scripts.mint_api_key --username admin --name "local-dev" --scopes admin
+export API_KEY="dk_..."
 ```
 
-**Using `/docs`?** Create a long-lived API key via `POST /auth/api-keys` (scope `write`) once, then paste it into Swagger's "Authorize" → `X-API-Key`. Re-paste it after page reloads.
+**Using `/docs`?** Paste the key into Swagger's "Authorize" → `X-API-Key`. Re-paste it after page reloads.
 
 ### 4. Query
 
@@ -231,13 +236,10 @@ Interactive docs at `http://localhost:8000/docs`.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `POST /auth/register` | No† | Create user account |
-| `POST /auth/login` | No | Get JWT token |
-| `GET /auth/me` | JWT | Current user info |
-| `POST /auth/api-keys` | JWT | Create API key |
-| `GET /auth/api-keys` | JWT | List API keys |
-| `PATCH /auth/api-keys/{id}` | JWT | Update API key |
-| `DELETE /auth/api-keys/{id}` | JWT | Revoke API key |
+| `POST /auth/api-keys` | Admin | Create API key for the calling admin's user |
+| `GET /auth/api-keys` | Admin | List API keys for the calling admin's user |
+| `PATCH /auth/api-keys/{id}` | Admin | Update API key |
+| `DELETE /auth/api-keys/{id}` | Admin | Revoke API key |
 | `GET /query` | Public* | Query OHLC data (cursor-paginated) |
 | `GET /download` | Public* | Download OHLC as CSV |
 | `GET /ticks` | Public* | Query tick data (cursor-paginated) |
@@ -262,27 +264,23 @@ Interactive docs at `http://localhost:8000/docs`.
 | `GET /healthcheck` | No | Health check |
 | `GET /metrics` | Admin | Prometheus metrics (request counts, latency histograms) |
 
-*Public when `ALLOW_PUBLIC_READS=true`, requires auth when `false` (default). Prefer header auth (`Authorization` / `X-API-Key`) over `?token=` / `?api_key=` query params — the former aren't logged by the request middleware.
-
-†`POST /auth/register` returns 403 when `ALLOW_REGISTRATION=false` (default). Mint API keys via `scripts/mint_api_key.py` for production use.
+*Public when `ALLOW_PUBLIC_READS=true`, requires auth when `false` (default).
 
 **Ingest form params:**
 - `derive` (bool, default `true`) — auto-materialize higher timeframes
 - `background` (bool, default `false`) — run derivation in a background job; response returns `derive_job_id`
 
-**Auth methods:** JWT Bearer (`Authorization: Bearer <token>`) or API key header (`X-API-Key: dk_...`)
+**Auth:** API key only — send `X-API-Key: dk_...` on every call. Mint keys via `scripts/mint_api_key.py` or the `POST /auth/api-keys` admin endpoint. WebSocket endpoints read the same header; query-string credentials are rejected to keep them out of proxy logs.
 
-**API key scopes:** `read` (query/download), `write` (read + ingest + export), `admin` (all, incl. restore + migrate-timezone)
+**API key scopes:** `read` (query/download), `write` (read + ingest + export), `admin` (all, incl. restore + migrate-timezone + key management)
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECRET_KEY` | — | **Required.** JWT signing key |
 | `POSTGRES_PASSWORD` | `datalake` | PostgreSQL password |
 | `API_PORT` | `8000` | API port |
 | `ALLOW_PUBLIC_READS` | `false` | Allow unauthenticated reads/streams |
-| `ALLOW_REGISTRATION` | `false` | Allow `POST /auth/register` |
 | `RATE_LIMIT_ENABLED` | `true` | Enable slowapi rate limits |
 | `RATE_LIMIT_DEFAULT` | `120/minute` | Default per-IP limit |
 | `MAX_WS_PER_CLIENT` | `5` | Max concurrent WebSocket connections per client IP |
@@ -334,7 +332,7 @@ src/
 ├── config.py                   # Environment loading
 ├── schemas.py                  # Pydantic models
 ├── auth/
-│   └── auth.py                 # JWT + API key auth
+│   └── auth.py                 # API key auth
 ├── core/
 │   ├── database.py             # SQLAlchemy models (User, APIKey)
 │   ├── datalake.py             # DuckDB operations (OHLC + tick + derivation + gaps)

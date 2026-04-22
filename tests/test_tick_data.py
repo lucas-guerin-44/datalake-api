@@ -4,7 +4,6 @@ Tests for tick data ingestion, storage, querying, and pipeline functions.
 import os
 import tempfile
 
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 
 import sys
 from pathlib import Path

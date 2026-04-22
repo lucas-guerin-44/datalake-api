@@ -8,13 +8,11 @@ import os
 # Set required environment variables before importing src modules.
 # ScopedAuth / ws_require_auth capture ALLOW_PUBLIC_READS at route-import time, so it
 # must be set before any src module loads — not inside a fixture.
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
-os.environ.setdefault("ALLOW_REGISTRATION", "true")
 os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
 
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -118,36 +116,10 @@ def inactive_user(db_session: Session) -> User:
     return user
 
 
-def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
-    """Create a JWT access token for testing."""
-    from jose import jwt
-    from src.config import SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
-
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-
-@pytest.fixture
-def valid_token(sample_user: User) -> str:
-    """Create a valid JWT token."""
-    return create_access_token(data={"sub": sample_user.username})
-
-
-@pytest.fixture
-def expired_token(sample_user: User) -> str:
-    """Create an expired JWT token."""
-    return create_access_token(data={"sub": sample_user.username}, expires_delta=timedelta(minutes=-10))
-
-
 @pytest.fixture
 def mock_env_vars():
     """Mock environment variables for testing."""
     env_vars = {
-        "SECRET_KEY": "test-secret-key-for-testing",
-        "JWT_ALGORITHM": "HS256",
-        "ACCESS_TOKEN_EXPIRE_MINUTES": "60",
         "ALLOW_PUBLIC_READS": "true",
         "DATABASE_URL": TEST_DATABASE_URL,
     }

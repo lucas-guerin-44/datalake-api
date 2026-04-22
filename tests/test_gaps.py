@@ -3,7 +3,6 @@ Tests for `find_gaps` / `/catalog/gaps` — locates holes in OHLC time series.
 """
 import os
 
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 
 import sys
 from pathlib import Path

@@ -4,7 +4,6 @@ Tests for catalog export / restore round trip.
 import json
 import os
 
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 
 import sys
 from pathlib import Path

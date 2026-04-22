@@ -147,13 +147,9 @@ cd datalake-api
 cp .env.example .env
 ```
 
-Generate real secrets:
+Generate the Postgres password:
 
 ```bash
-# SECRET_KEY (JWT signing key)
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-
-# POSTGRES_PASSWORD
 python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
 ```
 
@@ -167,25 +163,20 @@ nano .env   # arrow keys to navigate, Ctrl+O Enter to save, Ctrl+X to exit
 
 Set:
 - `POSTGRES_PASSWORD=<generated>`
-- `SECRET_KEY=<generated>`
 - `ALLOW_PUBLIC_READS=false`
-- `ALLOW_REGISTRATION=false`
 - `RATE_LIMIT_ENABLED=true` (default)
 - `MT5_BRIDGE_URL=http://host.docker.internal:18812` (default)
 
 **Option B — paste these one-liners (no editor):**
 
 ```bash
-SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 PGPASS=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
 
-sed -i "s|^SECRET_KEY=.*|SECRET_KEY=${SECRET}|"              .env
 sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PGPASS}|" .env
 sed -i "s|^ALLOW_PUBLIC_READS=.*|ALLOW_PUBLIC_READS=false|"   .env
-sed -i "s|^ALLOW_REGISTRATION=.*|ALLOW_REGISTRATION=false|"   .env
 
 # Print the updated lines to sanity-check
-grep -E "^(SECRET_KEY|POSTGRES_PASSWORD|ALLOW_PUBLIC_READS|ALLOW_REGISTRATION)=" .env
+grep -E "^(POSTGRES_PASSWORD|ALLOW_PUBLIC_READS)=" .env
 ```
 
 Tighten perms:
@@ -295,21 +286,24 @@ If readiness returns 503, check `docker compose logs api postgres`.
 
 ## 10. Create your user + mint a long-lived API key
 
-Registration is disabled in prod, so seed your user directly via `/auth/register`
-with the flag temporarily on, OR mint through Python. The one-shot path:
+There is no HTTP registration or login flow — users and keys are provisioned
+through the container. The `hashed_password` column still exists (NOT NULL in
+Postgres), but nothing authenticates with it; we fill it with random bytes and
+throw the plaintext away.
 
 ```bash
-# Flip registration on for 30 seconds
-docker compose -f docker-compose.prod.yml exec api sh -c 'ALLOW_REGISTRATION=true python -c "
+# Seed a user. Password is random + discarded — API keys are the only credential.
+docker compose -f docker-compose.prod.yml exec -T api python - <<'EOF'
+import secrets
 from src.core.database import get_db_context, create_user, get_user_by_username
 from src.auth.auth import get_password_hash
 with get_db_context() as db:
-    if not get_user_by_username(db, \"lucas\"):
-        create_user(db, \"lucas\", \"luca.guer1@gmail.com\", get_password_hash(\"Password\"))
-        print(\"created\")
+    if not get_user_by_username(db, "lucas"):
+        create_user(db, "lucas", "luca.guer1@gmail.com", get_password_hash(secrets.token_urlsafe(32)))
+        print("created")
     else:
-        print(\"exists\")
-"'
+        print("exists")
+EOF
 ```
 
 Mint the long-lived key:

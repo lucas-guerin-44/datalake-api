@@ -25,7 +25,21 @@ datalake.lucasguerin.fr {
 
 	log {
 		output stdout
-		format json
+		# Redact credential-bearing query params before they're written to disk.
+		# Belt-and-braces with middleware.py — the server now refuses these query
+		# params entirely, but keep this so a future regression can't leak keys.
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					delete token
+					delete api_key
+					delete apikey
+					delete access_token
+					delete password
+				}
+			}
+		}
 	}
 
 	reverse_proxy api:8000 {

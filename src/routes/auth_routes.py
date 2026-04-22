@@ -1,85 +1,41 @@
-"""Authentication routes - register, login, user info, API keys."""
+"""API-key management routes. All endpoints require an admin-scope API key.
+
+User creation and key minting is an operator task — use `scripts/mint_api_key.py`
+or the bootstrap snippet in deploy/RUNBOOK.md. There is no HTTP self-service
+registration or login flow by design.
+"""
 from datetime import datetime, timedelta
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from src.middleware.logging_config import get_logger
-from src.middleware.ratelimit import limiter
-from src.config import ALLOW_REGISTRATION
 from src.core.database import (
-    get_db, create_user, get_user_by_username, get_user_by_email, User,
+    get_db, User,
     create_api_key, get_api_key_by_id, get_api_keys_by_user,
     update_api_key, delete_api_key,
 )
 from src.schemas import (
-    Token, UserCreate, UserLogin, UserResponse,
     APIKeyCreate, APIKeyUpdate, APIKeyResponse, APIKeyCreatedResponse,
 )
 from src.auth.auth import (
-    authenticate_user, create_access_token, get_password_hash, get_current_user,
-    generate_api_key, hash_api_key, validate_scopes,
+    ScopedAuth, generate_api_key, hash_api_key, validate_scopes,
 )
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=UserResponse, status_code=201)
-@limiter.limit("5/minute")
-def register(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
-    """Register a new user account. Disabled when ALLOW_REGISTRATION=false."""
-    if not ALLOW_REGISTRATION:
-        raise HTTPException(status_code=403, detail="Registration is disabled on this deployment")
-
-    if get_user_by_username(db, user_data.username):
-        raise HTTPException(status_code=400, detail="Username already registered")
-    if get_user_by_email(db, user_data.email):
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    user = create_user(
-        db=db,
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=get_password_hash(user_data.password),
-    )
-    logger.info("User registered", extra={"username": user_data.username, "user_id": user.id})
-    return UserResponse(**user.to_dict())
-
-
-@router.post("/login", response_model=Token)
-@limiter.limit("10/minute")
-def login(request: Request, user_credentials: UserLogin, db: Session = Depends(get_db)):
-    """Authenticate and receive a JWT access token."""
-    user = authenticate_user(db, user_credentials.username, user_credentials.password)
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token = create_access_token(data={"sub": user.username})
-    logger.info("User logged in", extra={"username": user_credentials.username})
-    return Token(access_token=access_token)
-
-
-@router.get("/me", response_model=UserResponse)
-def get_current_user_info(current_user: User = Depends(get_current_user)):
-    """Get current authenticated user information."""
-    return UserResponse(**current_user.to_dict())
-
-
-# --- API Key endpoints ---
-
 @router.post("/api-keys", response_model=APIKeyCreatedResponse, status_code=201)
 def create_new_api_key(
     key_data: APIKeyCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(ScopedAuth("admin")),
     db: Session = Depends(get_db),
 ):
     """
-    Create a new API key. The full key is only returned once in this response.
+    Create a new API key for the calling admin's own user. The full key is only
+    returned once in this response.
 
     Scopes: read (query/download), write (read + ingest), admin (all)
     """
@@ -111,10 +67,10 @@ def create_new_api_key(
 
 @router.get("/api-keys", response_model=List[APIKeyResponse])
 def list_api_keys(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(ScopedAuth("admin")),
     db: Session = Depends(get_db),
 ):
-    """List all API keys for the authenticated user (metadata only, not the keys)."""
+    """List all API keys owned by the calling admin's user (metadata only)."""
     keys = get_api_keys_by_user(db, current_user.id)
     return [
         APIKeyResponse(
@@ -130,10 +86,10 @@ def list_api_keys(
 @router.get("/api-keys/{key_id}", response_model=APIKeyResponse)
 def get_api_key(
     key_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(ScopedAuth("admin")),
     db: Session = Depends(get_db),
 ):
-    """Get details of a specific API key."""
+    """Get details of a specific API key owned by the calling admin's user."""
     api_key = get_api_key_by_id(db, key_id)
     if not api_key or api_key.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="API key not found")
@@ -150,7 +106,7 @@ def get_api_key(
 def update_api_key_endpoint(
     key_id: int,
     key_data: APIKeyUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(ScopedAuth("admin")),
     db: Session = Depends(get_db),
 ):
     """Update an API key's name, scopes, expiration, or active status."""
@@ -185,7 +141,7 @@ def update_api_key_endpoint(
 @router.delete("/api-keys/{key_id}", status_code=204)
 def revoke_api_key(
     key_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(ScopedAuth("admin")),
     db: Session = Depends(get_db),
 ):
     """Permanently revoke an API key."""

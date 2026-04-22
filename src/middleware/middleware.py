@@ -10,6 +10,15 @@ from src.middleware.logging_config import get_logger, set_correlation_id, clear_
 
 logger = get_logger(__name__)
 
+# Query-param keys whose values must never appear in logs. WebSocket upgrades
+# can carry credentials here as a browser fallback (browsers can't set custom
+# headers on `new WebSocket()`), and those requests pass through this middleware.
+_REDACTED_QUERY_KEYS = {"token", "api_key", "apikey", "access_token", "password"}
+
+
+def _redact_query_params(params: dict) -> dict:
+    return {k: ("***" if k.lower() in _REDACTED_QUERY_KEYS else v) for k, v in params.items()}
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
@@ -27,7 +36,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # Extract request info
         method = request.method
         path = request.url.path
-        query_params = dict(request.query_params)
+        query_params = _redact_query_params(dict(request.query_params))
         client_host = request.client.host if request.client else None
 
         # Log incoming request

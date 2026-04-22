@@ -1,13 +1,16 @@
 """WebSocket streaming routes — replay historical ticks and bars at real-time speed."""
 import asyncio
 import json
+import os
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 
-from src.auth.auth import ws_require_auth
+from src.auth.auth import ws_require_auth, _ws_close_with_reason
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import get_db
 from src.core.datalake import get_db_connection
@@ -16,6 +19,36 @@ from src.middleware.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+# Per-client concurrent-connection cap. Prevents an authed client (or leaked API
+# key) from opening unlimited WS connections and exhausting the event loop.
+MAX_WS_PER_CLIENT = int(os.getenv("MAX_WS_PER_CLIENT", "5"))
+
+_ws_connections: dict[str, int] = defaultdict(int)
+_ws_lock = asyncio.Lock()
+
+
+def _ws_client_key(ws: WebSocket) -> str:
+    """Prefer the real client IP from X-Forwarded-For (set by Caddy)."""
+    xff = ws.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return ws.client.host if ws.client else "unknown"
+
+
+@asynccontextmanager
+async def _ws_slot(ws: WebSocket):
+    """Reserve one of the per-client connection slots; raise RuntimeError if full."""
+    key = _ws_client_key(ws)
+    async with _ws_lock:
+        if _ws_connections[key] >= MAX_WS_PER_CLIENT:
+            raise RuntimeError(f"ws-limit:{key}")
+        _ws_connections[key] += 1
+    try:
+        yield
+    finally:
+        async with _ws_lock:
+            _ws_connections[key] = max(0, _ws_connections[key] - 1)
 
 
 def _parse_ts(ts) -> datetime:
@@ -121,23 +154,28 @@ async def stream_ticks(
         token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
-    if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
-        return
     try:
-        instrument = validate_instrument(instrument)
+        async with _ws_slot(ws):
+            if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+                return
+            instrument = validate_instrument(instrument)
 
-        conditions = ["instrument = ?"]
-        params = [instrument]
-        if start:
-            conditions.append("timestamp >= ?::TIMESTAMP")
-            params.append(start)
-        if end:
-            conditions.append("timestamp <= ?::TIMESTAMP")
-            params.append(end)
+            conditions = ["instrument = ?"]
+            params = [instrument]
+            if start:
+                conditions.append("timestamp >= ?::TIMESTAMP")
+                params.append(start)
+            if end:
+                conditions.append("timestamp <= ?::TIMESTAMP")
+                params.append(end)
 
-        columns = ["timestamp", "price", "volume", "bid", "ask"]
-        await _stream_rows(ws, "tick_data", columns, conditions, params, speed, max_delay)
-
+            columns = ["timestamp", "price", "volume", "bid", "ask"]
+            await _stream_rows(ws, "tick_data", columns, conditions, params, speed, max_delay)
+    except RuntimeError as e:
+        if str(e).startswith("ws-limit:"):
+            await _ws_close_with_reason(ws, 4429, "too many concurrent connections")
+            return
+        raise
     except WebSocketDisconnect:
         logger.info("Tick stream client disconnected", extra={"instrument": instrument})
     except Exception as e:
@@ -178,24 +216,29 @@ async def stream_bars(
         token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
-    if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
-        return
     try:
-        instrument = validate_instrument(instrument)
-        timeframe = validate_timeframe(timeframe)
+        async with _ws_slot(ws):
+            if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+                return
+            instrument = validate_instrument(instrument)
+            timeframe = validate_timeframe(timeframe)
 
-        conditions = ["instrument = ?", "timeframe = ?"]
-        params = [instrument, timeframe]
-        if start:
-            conditions.append("timestamp >= ?::TIMESTAMP")
-            params.append(start)
-        if end:
-            conditions.append("timestamp <= ?::TIMESTAMP")
-            params.append(end)
+            conditions = ["instrument = ?", "timeframe = ?"]
+            params = [instrument, timeframe]
+            if start:
+                conditions.append("timestamp >= ?::TIMESTAMP")
+                params.append(start)
+            if end:
+                conditions.append("timestamp <= ?::TIMESTAMP")
+                params.append(end)
 
-        columns = ["timestamp", "open", "high", "low", "close"]
-        await _stream_rows(ws, "ohlc_data", columns, conditions, params, speed, max_delay)
-
+            columns = ["timestamp", "open", "high", "low", "close"]
+            await _stream_rows(ws, "ohlc_data", columns, conditions, params, speed, max_delay)
+    except RuntimeError as e:
+        if str(e).startswith("ws-limit:"):
+            await _ws_close_with_reason(ws, 4429, "too many concurrent connections")
+            return
+        raise
     except WebSocketDisconnect:
         logger.info("Bar stream client disconnected", extra={"instrument": instrument})
     except Exception as e:

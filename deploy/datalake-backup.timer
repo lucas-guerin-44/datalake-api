@@ -1,0 +1,12 @@
+[Unit]
+Description=Trigger datalake weekly backup
+
+[Timer]
+# Sundays at 05:00 UTC. Persistent=true ensures missed runs (VPS was down) fire at next boot.
+OnCalendar=Sun *-*-* 05:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+Unit=datalake-backup.service
+
+[Install]
+WantedBy=timers.target

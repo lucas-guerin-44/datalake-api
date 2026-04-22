@@ -33,9 +33,11 @@ services:
     volumes:
       - ./datalake:/app/datalake
       - ./staging:/app/staging
-      # Mount source code for hot-reload during development.
-      # Comment out or remove this line for production deployments.
+      # Dev-only hot-reload mount. Omitted in docker-compose.prod.yml.
       - ./src:/app/src
+    # Allow the API container to reach a locally-hosted MT5 bridge (Wine/Windows).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

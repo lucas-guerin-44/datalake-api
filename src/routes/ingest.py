@@ -1,15 +1,20 @@
 """Ingest routes - upload and batch ingest data files."""
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, File, Request, UploadFile, HTTPException
+from pydantic import BaseModel, Field
 
 from src.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 from src.middleware.logging_config import get_logger
 from src.core.database import User
-from src.core.datalake import derive_ohlc_timeframes, derive_ohlc_from_ticks, write_transaction
-from src.services.pipeline import ingest_single_file, ingest_tick_file, parse_filename_meta, DEFAULT_STAGING
+from src.core.datalake import derive_ohlc_timeframes, derive_ohlc_from_ticks, write_transaction, list_instruments
+from src.services.pipeline import ingest_single_file, ingest_tick_file, parse_filename_meta, ingest_dataframe, DEFAULT_STAGING
 from src.services.validators import validate_instrument, validate_timeframe, sanitize_filename
 from src.services.jobs import create_job, finish_job
+from src.services.mt5_client import fetch_m1_bars, ping as mt5_ping, MT5BridgeError
+from src.middleware.ratelimit import limiter
 from src.auth.auth import ScopedAuth
 
 logger = get_logger(__name__)
@@ -213,3 +218,97 @@ async def ingest_tick_batch_api(
             results.append({"file": f.name, "status": "error", "error": str(e)})
 
     return {"results": results}
+
+
+# --- MT5 refresh (pulls M1 from Wine-hosted MT5 bridge, derives upward) ---
+
+class RefreshRequest(BaseModel):
+    instruments: Optional[List[str]] = Field(
+        None,
+        description="Symbols to refresh. Defaults to every instrument currently in the catalog.",
+    )
+    days: int = Field(7, ge=1, le=365, description="Fetch the last N days of M1 bars.")
+
+
+def _run_refresh_job(job_id: str, instruments: List[str], start: datetime, end: datetime):
+    """Background job: for each instrument, pull M1 from MT5 and derive upward to D1."""
+    per_instrument = {}
+    errors = {}
+    total_rows = 0
+
+    for symbol in instruments:
+        try:
+            df = fetch_m1_bars(symbol, start, end)
+            if df.empty:
+                per_instrument[symbol] = {"rows": 0, "derived": {}}
+                continue
+
+            rows = ingest_dataframe(df, symbol, "M1", derive=True)
+            per_instrument[symbol] = {
+                "rows": rows,
+                "window": {"start": str(df["timestamp"].min()), "end": str(df["timestamp"].max())},
+            }
+            total_rows += rows
+        except Exception as e:
+            logger.exception("Refresh failed for instrument", extra={"symbol": symbol, "job_id": job_id})
+            errors[symbol] = str(e)
+
+    result = {
+        "instruments": per_instrument,
+        "errors": errors,
+        "total_rows": total_rows,
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+    }
+    # Job succeeds even if some instruments failed — per-instrument errors are in the result.
+    # Only fail the job if every instrument errored.
+    if errors and not per_instrument:
+        finish_job(job_id, error=f"All instruments failed. Sample: {next(iter(errors.values()))}")
+    else:
+        finish_job(job_id, result=result)
+
+
+@router.post("/ingest/refresh")
+@limiter.limit("6/hour")
+async def ingest_refresh(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    req: RefreshRequest = RefreshRequest(),
+    current_user: User = Depends(ScopedAuth("write")),
+):
+    """
+    Refresh M1 OHLC from MT5 for the last N days, then derive M5..D1.
+
+    Iterates the datalake's current instrument catalog by default so the source
+    of truth for "which symbols matter" stays in the API, not the MT5 side.
+    Runs as a background job — returns a job id you can poll via /jobs/{id}.
+    """
+    if not mt5_ping():
+        raise HTTPException(
+            status_code=503,
+            detail="MT5 bridge unreachable. Check MT5_BRIDGE_URL and that the Wine-side server is running.",
+        )
+
+    if req.instruments:
+        instruments = [validate_instrument(s) for s in req.instruments]
+    else:
+        instruments = list_instruments()
+
+    if not instruments:
+        return {"status": "empty", "message": "No instruments to refresh."}
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=req.days)
+
+    job = create_job(
+        "mt5_refresh",
+        meta={"instruments": instruments, "days": req.days, "start": start.isoformat(), "end": end.isoformat()},
+    )
+    background_tasks.add_task(_run_refresh_job, job.id, instruments, start, end)
+
+    return {
+        "status": "queued",
+        "job_id": job.id,
+        "instruments": instruments,
+        "days": req.days,
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+    }

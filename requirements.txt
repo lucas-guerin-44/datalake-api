@@ -23,3 +23,6 @@ python-json-logger==2.0.7
 
 # Configuration
 python-dotenv==1.1.1
+
+# Rate limiting
+slowapi==0.1.9

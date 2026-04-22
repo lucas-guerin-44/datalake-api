@@ -2,10 +2,12 @@
 from datetime import datetime, timedelta
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from src.middleware.logging_config import get_logger
+from src.middleware.ratelimit import limiter
+from src.config import ALLOW_REGISTRATION
 from src.core.database import (
     get_db, create_user, get_user_by_username, get_user_by_email, User,
     create_api_key, get_api_key_by_id, get_api_keys_by_user,
@@ -25,8 +27,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
-    """Register a new user account."""
+@limiter.limit("5/minute")
+def register(request: Request, user_data: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user account. Disabled when ALLOW_REGISTRATION=false."""
+    if not ALLOW_REGISTRATION:
+        raise HTTPException(status_code=403, detail="Registration is disabled on this deployment")
+
     if get_user_by_username(db, user_data.username):
         raise HTTPException(status_code=400, detail="Username already registered")
     if get_user_by_email(db, user_data.email):
@@ -43,7 +49,8 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, user_credentials: UserLogin, db: Session = Depends(get_db)):
     """Authenticate and receive a JWT access token."""
     user = authenticate_user(db, user_credentials.username, user_credentials.password)
     if not user:

@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: datalake-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-datalake}
+      POSTGRES_USER: ${POSTGRES_USER:-datalake}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    # No host port mapping - Postgres is only reachable via the internal network.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datalake}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+    restart: unless-stopped
+    networks:
+      - datalake-network
+
+  api:
+    image: ${API_IMAGE:-datalake-api:latest}
+    container_name: ohlc-datalake-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-datalake}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-datalake}
+      DUCKDB_PATH: /app/datalake/ohlc.duckdb
+      ALLOW_PUBLIC_READS: "false"
+    # No host port mapping - only Caddy reaches the API.
+    volumes:
+      - ./datalake:/app/datalake
+      - ./staging:/app/staging
+      - ./backups:/app/backups
+    # Allow the API container to reach the Wine-hosted MT5 bridge on the VPS host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2.0"
+    restart: unless-stopped
+    networks:
+      - datalake-network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: datalake-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - datalake-network
+
+volumes:
+  postgres_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  datalake-network:
+    driver: bridge

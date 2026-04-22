@@ -1,0 +1,36 @@
+# Caddy reverse proxy for the datalake API.
+# Auto-TLS via Let's Encrypt — requires datalake.lucasguerin.fr A record
+# pointing at this VPS and ports 80+443 open.
+
+{
+	email luca.guer1@gmail.com
+}
+
+datalake.lucasguerin.fr {
+	encode gzip zstd
+
+	# Cap request body at 550MB (slightly above MAX_UPLOAD_SIZE_MB=500 + overhead).
+	request_body {
+		max_size 550MB
+	}
+
+	# Basic rate limit headers (Caddy doesn't ship rate-limiting in core;
+	# install caddy-ratelimit plugin if you want true throttling).
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+
+	reverse_proxy api:8000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

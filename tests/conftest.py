@@ -7,6 +7,8 @@ import os
 
 # Set required environment variables before importing src modules
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+os.environ.setdefault("ALLOW_REGISTRATION", "true")
 
 import sys
 from datetime import datetime, timedelta

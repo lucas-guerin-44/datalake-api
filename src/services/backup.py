@@ -11,7 +11,7 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.config import PROJECT_ROOT
 from src.core.datalake import get_db_connection, write_transaction
@@ -22,6 +22,39 @@ logger = get_logger(__name__)
 DEFAULT_BACKUP_ROOT = PROJECT_ROOT / "backups"
 MANIFEST_FILENAME = "manifest.json"
 SCHEMA_VERSION = 1
+
+
+def list_backups(backup_root: Path = None) -> list[dict]:
+    """List all backup directories under `backup_root`, newest first."""
+    root = Path(backup_root) if backup_root else DEFAULT_BACKUP_ROOT
+    if not root.exists():
+        return []
+    out = []
+    for d in sorted(root.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        m = d / MANIFEST_FILENAME
+        if m.exists():
+            out.append({"name": d.name, "path": str(d), "manifest_path": str(m)})
+    return out
+
+
+def latest_manifest(backup_root: Path = None) -> Optional[Dict[str, Any]]:
+    """Return the manifest dict of the most recent backup, or None if there are none."""
+    backups = list_backups(backup_root)
+    if not backups:
+        return None
+    return json.loads(Path(backups[0]["manifest_path"]).read_text())
+
+
+def prune_old_backups(keep: int = 8, backup_root: Path = None) -> int:
+    """Keep the `keep` newest backup directories; delete the rest. Returns count removed."""
+    backups = list_backups(backup_root)
+    removed = 0
+    for b in backups[keep:]:
+        shutil.rmtree(b["path"], ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def export_catalog(output_dir: Path = None) -> Dict[str, Any]:

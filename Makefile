@@ -7,6 +7,15 @@ export
 VPS ?=
 REMOTE_PATH ?= /opt/datalake-api
 
+# On Windows, MSYS ships its own ssh that reads keys from /home/<user>/.ssh
+# (not %USERPROFILE%\.ssh). Force Windows's native OpenSSH — same binary your
+# interactive PowerShell session uses, so it picks up the existing known_hosts.
+ifeq ($(OS),Windows_NT)
+SSH ?= /c/Windows/System32/OpenSSH/ssh.exe
+else
+SSH ?= ssh
+endif
+
 help:
 	@echo "Usage:"
 	@echo ""
@@ -78,20 +87,16 @@ deploy:
 	     git diff --name-only --ignore-cr-at-eol HEAD -- >&2; \
 	     exit 2; \
 	 fi
-	@# On Windows, MSYS/Git Bash sets HOME=/home/<user>, which isn't where ssh
-	@# keys/known_hosts actually live — point HOME at USERPROFILE so ssh picks
-	@# up C:\Users\<you>\.ssh. On Linux/macOS USERPROFILE is unset so HOME stays.
-	@export HOME="$${USERPROFILE:-$$HOME}"; \
-	 SHA=$$(git rev-parse --short HEAD); \
+	@SHA=$$(git rev-parse --short HEAD); \
 	 IMAGE=datalake-api:$$SHA; \
 	 echo ">> [local] building $$IMAGE"; \
 	 docker build -t "$$IMAGE" -t datalake-api:latest . && \
 	 echo ">> [ship] saving + transferring image to $(VPS)" && \
-	 docker save "$$IMAGE" | gzip | ssh $(VPS) "gunzip | docker load" && \
+	 docker save "$$IMAGE" | gzip | $(SSH) $(VPS) "gunzip | docker load" && \
 	 echo ">> [remote] git pull (compose/Caddy/migrations)" && \
-	 ssh $(VPS) "cd $(REMOTE_PATH) && git pull --ff-only" && \
+	 $(SSH) $(VPS) "cd $(REMOTE_PATH) && git pull --ff-only" && \
 	 echo ">> [remote] API_IMAGE=$$IMAGE ./deploy/deploy.sh --no-pull --skip-build" && \
-	 ssh $(VPS) "cd $(REMOTE_PATH) && API_IMAGE=$$IMAGE ./deploy/deploy.sh --no-pull --skip-build" && \
+	 $(SSH) $(VPS) "cd $(REMOTE_PATH) && API_IMAGE=$$IMAGE ./deploy/deploy.sh --no-pull --skip-build" && \
 	 echo ">> deployed $$IMAGE to $(VPS)"
 
 deploy-check:

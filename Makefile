@@ -78,7 +78,11 @@ deploy:
 	     git diff --name-only --ignore-cr-at-eol HEAD -- >&2; \
 	     exit 2; \
 	 fi
-	@SHA=$$(git rev-parse --short HEAD); \
+	@# On Windows, MSYS/Git Bash sets HOME=/home/<user>, which isn't where ssh
+	@# keys/known_hosts actually live — point HOME at USERPROFILE so ssh picks
+	@# up C:\Users\<you>\.ssh. On Linux/macOS USERPROFILE is unset so HOME stays.
+	@export HOME="$${USERPROFILE:-$$HOME}"; \
+	 SHA=$$(git rev-parse --short HEAD); \
 	 IMAGE=datalake-api:$$SHA; \
 	 echo ">> [local] building $$IMAGE"; \
 	 docker build -t "$$IMAGE" -t datalake-api:latest . && \

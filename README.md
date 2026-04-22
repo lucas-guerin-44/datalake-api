@@ -231,7 +231,7 @@ Interactive docs at `http://localhost:8000/docs`.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `POST /auth/register` | No | Create user account |
+| `POST /auth/register` | No† | Create user account |
 | `POST /auth/login` | No | Get JWT token |
 | `GET /auth/me` | JWT | Current user info |
 | `POST /auth/api-keys` | JWT | Create API key |
@@ -257,11 +257,14 @@ Interactive docs at `http://localhost:8000/docs`.
 | `POST /ingest-batch/ticks` | Write | Batch import ticks from folder |
 | `GET /jobs` | Public* | List recent background jobs |
 | `GET /jobs/{id}` | Public* | Get status/result of a specific job |
-| `WS /ws/ticks` | No | Stream tick data (live-feed replay) |
-| `WS /ws/bars` | No | Stream OHLC bars (live-feed replay) |
+| `WS /ws/ticks` | Public* | Stream tick data (live-feed replay) |
+| `WS /ws/bars` | Public* | Stream OHLC bars (live-feed replay) |
 | `GET /healthcheck` | No | Health check |
+| `GET /metrics` | Admin | Prometheus metrics (request counts, latency histograms) |
 
-*Public when `ALLOW_PUBLIC_READS=true` (default), requires auth when `false`.
+*Public when `ALLOW_PUBLIC_READS=true`, requires auth when `false` (default). Prefer header auth (`Authorization` / `X-API-Key`) over `?token=` / `?api_key=` query params — the former aren't logged by the request middleware.
+
+†`POST /auth/register` returns 403 when `ALLOW_REGISTRATION=false` (default). Mint API keys via `scripts/mint_api_key.py` for production use.
 
 **Ingest form params:**
 - `derive` (bool, default `true`) — auto-materialize higher timeframes
@@ -278,7 +281,11 @@ Interactive docs at `http://localhost:8000/docs`.
 | `SECRET_KEY` | — | **Required.** JWT signing key |
 | `POSTGRES_PASSWORD` | `datalake` | PostgreSQL password |
 | `API_PORT` | `8000` | API port |
-| `ALLOW_PUBLIC_READS` | `true` | Public read access |
+| `ALLOW_PUBLIC_READS` | `false` | Allow unauthenticated reads/streams |
+| `ALLOW_REGISTRATION` | `false` | Allow `POST /auth/register` |
+| `RATE_LIMIT_ENABLED` | `true` | Enable slowapi rate limits |
+| `RATE_LIMIT_DEFAULT` | `120/minute` | Default per-IP limit |
+| `MAX_WS_PER_CLIENT` | `5` | Max concurrent WebSocket connections per client IP |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `DUCKDB_PATH` | `datalake/ohlc.duckdb` | Path to the DuckDB file |
 | `DUCKDB_MEMORY_LIMIT` | `2GB` | Memory cap for DuckDB query execution |
@@ -336,7 +343,8 @@ src/
 │   └── pagination.py           # Cursor-based pagination
 ├── middleware/
 │   ├── logging_config.py       # Structured JSON logging
-│   └── middleware.py           # Request logging
+│   ├── middleware.py           # Request logging (redacts token / api_key query params)
+│   └── ratelimit.py            # slowapi limiter (per-IP)
 ├── services/
 │   ├── backup.py               # Parquet export/restore
 │   ├── jobs.py                 # In-memory background job registry
@@ -356,28 +364,28 @@ src/
 ## Make Commands
 
 ```bash
-make up           # Start services
-make down         # Stop
-make logs         # Tail logs
-make clean        # Stop + delete volumes
-make test         # Run tests
-make health       # Health check
-make backend      # Run locally (hot-reload)
-make shell-api    # Shell into API container
-make shell-db     # PostgreSQL shell
+make up                             # Start services
+make down                            # Stop
+make logs                            # Tail logs
+make clean                           # Stop + delete volumes
+make test                            # Run tests
+make health                          # Health check
+make backend                         # Run locally (hot-reload)
+make shell-api                       # Shell into API container
+make shell-db                        # PostgreSQL shell
+make deploy VPS=user@host            # Build locally, ship image over SSH, redeploy prod stack
+make deploy-check VPS=user@host      # Dry-run summary
 ```
 
 ## Known Limitations
 
 - **Single DuckDB file** — fine for millions of rows, may need sharding at billions. Single-writer is enforced at the Python layer via a process-level lock.
 - **Background jobs are in-memory** — the `_JOBS` registry doesn't survive API restarts. Long-running jobs lose their status if the container is restarted mid-flight (the write still completes atomically, you just won't be able to poll the outcome).
-- **WebSocket streaming has no auth** — suitable for local/trusted networks, not public-facing without a proxy.
-- **No scheduled backups** — the `/catalog/export` endpoint exists but you need to call it (cron, systemd timer, etc.).
 - **No point-in-time correctness** — the datalake stores the latest known value per `(instrument, timeframe, timestamp)`. Restatements overwrite. Fine for personal backtests; wrong for regulated contexts.
 
 ## Disclaimer
 
-Built in an afternoon out of personal need — I wanted a single place to dump MT5 CSV exports and query them without spinning up a full data warehouse. It has grown a bit since: auto-derivation, backups, transactional ingest. It works, it's tested (200+ tests), but it's still personal software. If you use it, expect to tweak things to fit your setup.
+Built in an afternoon out of personal need — I wanted a single place to dump MT5 CSV exports and query them without spinning up a full data warehouse. It has grown a bit since: auto-derivation, backups, transactional ingest, WebSocket auth gating, graceful shutdown, metrics. It works, it's tested (230+ tests), but it's still personal software. If you use it, expect to tweak things to fit your setup.
 
 ## License
 

@@ -323,17 +323,59 @@ docker compose -f docker-compose.prod.yml exec api \
 once, never again. From your laptop you now call the API with
 `-H "X-API-Key: dk_..."`.
 
-## 11. cronjob.org
+## 11. Scheduled jobs (systemd timers + cronjob.org)
 
-Set up two jobs pointing at your domain:
+### Liveness monitoring — cronjob.org
 
-1. **Liveness poll** — `GET https://<DOMAIN>/healthcheck/ready`, every 5 min,
-   email on non-2xx. This is the one that wakes you up at night.
-2. **Weekly ingest refresh** — `POST https://<DOMAIN>/ingest/refresh` with
-   header `X-API-Key: dk_...` and JSON body `{"days": 7}`, Sundays 03:00 UTC.
+Point a job at `GET https://<DOMAIN>/healthcheck/ready`, every 5 min, email on
+non-2xx. This is the one that wakes you up at night; systemd timers can't page
+you if the whole VPS is down.
 
-Optional third: **weekly backup** — `POST https://<DOMAIN>/backup/run?keep=8`,
-Sundays 05:00 UTC.
+### Weekly refresh + backup — systemd timers on the VPS
+
+Two timer pairs ship under `deploy/`:
+
+- `datalake-refresh.{service,timer}` — `POST /ingest/refresh` with `{"days": 7}`
+  every Sunday 03:00 UTC. Depends on `mt5-bridge.service`.
+- `datalake-backup.{service,timer}` — `POST /backup/run?keep=8` every Sunday
+  05:00 UTC. Runs after refresh so the weekend's fresh data is exported.
+
+Install once:
+
+```bash
+# 1. Mint an admin API key if you don't already have one
+docker compose -f docker-compose.prod.yml exec api \
+    python -m scripts.mint_api_key --username lucas --name "cron" --scopes admin
+# Copy the dk_... string.
+
+# 2. Stash the key in a root-readable env file
+sudo mkdir -p /etc/datalake
+echo "API_KEY=dk_paste_here" | sudo tee /etc/datalake/api-key > /dev/null
+sudo chmod 600 /etc/datalake/api-key
+sudo chown root:root /etc/datalake/api-key
+
+# 3. Install + enable the units
+sudo cp deploy/datalake-backup.service  /etc/systemd/system/
+sudo cp deploy/datalake-backup.timer    /etc/systemd/system/
+sudo cp deploy/datalake-refresh.service /etc/systemd/system/
+sudo cp deploy/datalake-refresh.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now datalake-backup.timer datalake-refresh.timer
+```
+
+Verify:
+
+```bash
+# Next scheduled fire-time per timer
+systemctl list-timers datalake-*
+
+# Run once now to smoke-test
+sudo systemctl start datalake-backup.service
+journalctl -u datalake-backup.service -n 50
+```
+
+Rotate the key: edit `/etc/datalake/api-key` and `sudo systemctl daemon-reload`.
+No service restart needed — `EnvironmentFile` is read on each activation.
 
 ## 12. Backups — retrieving artifacts
 

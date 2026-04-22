@@ -1,0 +1,18 @@
+[Unit]
+Description=Datalake weekly MT5 refresh (POST /ingest/refresh, 7-day window)
+Requires=network-online.target mt5-bridge.service
+After=network-online.target mt5-bridge.service
+
+[Service]
+Type=oneshot
+User=datalake
+Group=datalake
+EnvironmentFile=/etc/datalake/api-key
+ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 1800 \
+    -X POST \
+    -H "X-API-Key: ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"days": 7}' \
+    "https://datalake.lucasguerin.fr/ingest/refresh"
+StandardOutput=journal
+StandardError=journal

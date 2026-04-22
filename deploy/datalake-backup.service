@@ -1,0 +1,18 @@
+[Unit]
+Description=Datalake weekly backup (POST /backup/run)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=datalake
+Group=datalake
+# /etc/datalake/api-key must contain: API_KEY=dk_...
+# Create with: echo "API_KEY=$(cat your-key)" | sudo tee /etc/datalake/api-key && sudo chmod 600 /etc/datalake/api-key
+EnvironmentFile=/etc/datalake/api-key
+ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 300 \
+    -X POST \
+    -H "X-API-Key: ${API_KEY}" \
+    "https://datalake.lucasguerin.fr/backup/run?keep=8"
+StandardOutput=journal
+StandardError=journal

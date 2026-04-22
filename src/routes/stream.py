@@ -4,8 +4,12 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
+from sqlalchemy.orm import Session
 
+from src.auth.auth import ws_require_auth
+from src.config import ALLOW_PUBLIC_READS
+from src.core.database import get_db
 from src.core.datalake import get_db_connection
 from src.services.validators import validate_instrument, validate_timeframe
 from src.middleware.logging_config import get_logger
@@ -102,6 +106,9 @@ async def stream_ticks(
     end: Optional[str] = Query(None),
     speed: float = Query(1.0, gt=0),
     max_delay: float = Query(10.0, ge=0),
+    token: Optional[str] = Query(None),
+    api_key: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
 ):
     """
     Stream historical tick data at real-time speed (or multiplied).
@@ -111,8 +118,11 @@ async def stream_ticks(
         start / end — optional ISO-8601 timestamp bounds
         speed — playback multiplier (1.0 = real-time, 10.0 = 10x fast)
         max_delay — upper bound in seconds on sleep between messages (0 = burst)
+        token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
+    if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+        return
     try:
         instrument = validate_instrument(instrument)
 
@@ -152,6 +162,9 @@ async def stream_bars(
     end: Optional[str] = Query(None),
     speed: float = Query(1.0, gt=0),
     max_delay: float = Query(10.0, ge=0),
+    token: Optional[str] = Query(None),
+    api_key: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
 ):
     """
     Stream historical OHLC bars at real-time speed (or multiplied).
@@ -162,8 +175,11 @@ async def stream_bars(
         start / end — optional ISO-8601 timestamp bounds
         speed — playback multiplier (1.0 = real-time, 60.0 = 1 bar/sec for M1)
         max_delay — upper bound in seconds on sleep between messages (0 = burst)
+        token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
+    if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+        return
     try:
         instrument = validate_instrument(instrument)
         timeframe = validate_timeframe(timeframe)

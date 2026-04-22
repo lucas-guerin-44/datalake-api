@@ -1,0 +1,29 @@
+[Unit]
+Description=MT5 terminal under Wine (runs trading strategies)
+Requires=xvfb.service
+After=xvfb.service network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root
+Environment=WINEPREFIX=/root/.wine
+Environment=DISPLAY=:99
+Environment=WINEDEBUG=-all
+# Kill any stragglers from a previous run so wine starts against a clean wineserver.
+# The '-' prefix means "ignore non-zero exit" (pkill returns 1 when nothing matches).
+ExecStartPre=-/usr/bin/pkill -9 -f wineserver
+ExecStartPre=-/usr/bin/pkill -9 -f terminal64
+# Brief pause to let Xvfb fully initialize before wine attaches
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/wine "/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+# Restart if it crashes, but not if it exits cleanly (you may close it intentionally via VNC)
+Restart=on-failure
+RestartSec=10
+# Wine's stderr is verbose — send to its own log rather than drowning the journal
+StandardOutput=append:/var/log/mt5-terminal.log
+StandardError=append:/var/log/mt5-terminal.log
+
+[Install]
+WantedBy=multi-user.target

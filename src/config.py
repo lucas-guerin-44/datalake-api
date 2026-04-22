@@ -24,9 +24,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 # Defaults to False for safety - flip to true only if you intentionally want public reads.
 ALLOW_PUBLIC_READS = os.getenv("ALLOW_PUBLIC_READS", "false").lower() in ("true", "1", "yes")
 
-# If True, POST /auth/register is open. Flip to False on production deployments
-# where you want a closed user set (mint API keys via scripts/mint_api_key.py instead).
-ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").lower() in ("true", "1", "yes")
+# If True, POST /auth/register is open. Defaults to False — production deployments
+# should mint API keys via scripts/mint_api_key.py instead of self-service registration.
+# Flip to true explicitly if you want an open registration window.
+ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "false").lower() in ("true", "1", "yes")
 
 # PostgreSQL
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "datalake")

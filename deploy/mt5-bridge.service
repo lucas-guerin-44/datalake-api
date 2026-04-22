@@ -1,0 +1,22 @@
+[Unit]
+Description=MT5 Wine Bridge (exposes MetaTrader5 to the Datalake API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=datalake
+Group=datalake
+Environment=WINEPREFIX=/home/datalake/.wine-mt5
+Environment=WINEDEBUG=-all
+Environment=DISPLAY=:0
+WorkingDirectory=/opt/datalake-api
+# Adjust the python path below to your wine-python install (see deploy/README hint at top of file).
+ExecStart=/usr/bin/wine "/home/datalake/.wine-mt5/drive_c/Python311/python.exe" /opt/datalake-api/scripts/mt5_bridge.py --host 127.0.0.1 --port 18812
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

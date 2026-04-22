@@ -1,0 +1,13 @@
+[Unit]
+Description=x11vnc bound to display :99 (optional, for VNC into the MT5 session)
+Requires=xvfb.service
+After=xvfb.service
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/x11vnc -display :99 -rfbport 5902 -localhost -forever -shared -nopw -noxdamage -bg -o /var/log/x11vnc.log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

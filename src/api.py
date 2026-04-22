@@ -24,6 +24,7 @@ from src.routes import (
     stream_router,
     jobs_router,
     backup_router,
+    public_router,
 )
 
 setup_logging()
@@ -55,6 +56,7 @@ app.include_router(health_router)
 app.include_router(stream_router)
 app.include_router(jobs_router)
 app.include_router(backup_router)
+app.include_router(public_router)
 
 
 @app.on_event("startup")

@@ -1,6 +1,10 @@
-# Caddy reverse proxy for the datalake API.
+# Caddy reverse proxy.
 # Auto-TLS via Let's Encrypt — requires datalake.lucasguerin.fr A record
 # pointing at this VPS and ports 80+443 open.
+#
+# Routing:
+#   /api/*   → FastAPI container (prefix stripped before forwarding)
+#   /        → static landing site container (web.Dockerfile)
 
 {
 	email luca.guer1@gmail.com
@@ -10,12 +14,11 @@ datalake.lucasguerin.fr {
 	encode gzip zstd
 
 	# Cap request body at 550MB (slightly above MAX_UPLOAD_SIZE_MB=500 + overhead).
+	# Only enforced for the API path; the static site never accepts uploads.
 	request_body {
 		max_size 550MB
 	}
 
-	# Basic rate limit headers (Caddy doesn't ship rate-limiting in core;
-	# install caddy-ratelimit plugin if you want true throttling).
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
@@ -47,9 +50,18 @@ datalake.lucasguerin.fr {
 		}
 	}
 
-	reverse_proxy api:8000 {
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
+	# API — strip /api so FastAPI routes (/query, /catalog, /ingest, ...) stay
+	# mounted at root inside the container.
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# Landing page — everything else falls through to the static site container.
+	handle {
+		reverse_proxy web:80
 	}
 }

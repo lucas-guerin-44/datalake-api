@@ -8,6 +8,7 @@ from src.routes.health import router as health_router
 from src.routes.stream import router as stream_router
 from src.routes.jobs import router as jobs_router
 from src.routes.backup import router as backup_router
+from src.routes.public import router as public_router
 
 __all__ = [
     "catalog_router",
@@ -19,4 +20,5 @@ __all__ = [
     "stream_router",
     "jobs_router",
     "backup_router",
+    "public_router",
 ]

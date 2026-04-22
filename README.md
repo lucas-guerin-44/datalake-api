@@ -263,6 +263,7 @@ Interactive docs at `http://localhost:8000/docs`.
 | `WS /ws/bars` | Public* | Stream OHLC bars (live-feed replay) |
 | `GET /healthcheck` | No | Health check |
 | `GET /metrics` | Admin | Prometheus metrics (request counts, latency histograms) |
+| `GET /public/stats` | No (always) | Aggregate-only landing-page stats, cached 60s, rate-limited 30/min |
 
 *Public when `ALLOW_PUBLIC_READS=true`, requires auth when `false` (default).
 
@@ -355,9 +356,33 @@ src/
     ├── ingest.py               # /ingest, /ingest/ticks, /ingest-batch*
     ├── instruments.py          # /instruments, /timeframes
     ├── jobs.py                 # /jobs, /jobs/{id}
+    ├── public.py               # /public/stats (aggregate-only, no auth, cached)
     ├── query.py                # /query, /download, /ticks, /ticks/download
     └── stream.py               # /ws/ticks, /ws/bars
+
+web/                            # Astro + Tailwind landing page (served at https://datalake.lucasguerin.fr/)
+├── src/
+│   ├── layouts/Base.astro
+│   ├── pages/index.astro
+│   ├── components/             # Hero, StatsStrip (live via /api/public/stats), Architecture, Stack, SampleResponse
+│   └── styles/global.css
+├── astro.config.mjs
+└── package.json
 ```
+
+## Landing page
+
+`web/` is a static Astro site served at the apex `https://datalake.lucasguerin.fr/`. It's built inside `web.Dockerfile` (Node builder → Caddy runtime) and wired into `docker-compose.prod.yml` as the `web` service. The edge Caddy proxies `/api/*` to the FastAPI container (prefix-stripped) and everything else to `web:80`.
+
+Local dev (no Caddy split, API still on `localhost:8000`):
+
+```bash
+cd web
+npm install
+npm run dev           # http://localhost:4321
+```
+
+Point the landing at a running API during dev by editing `StatsStrip.astro`'s fetch URL, or run the whole prod stack via `docker compose -f docker-compose.prod.yml up --build`.
 
 ## Make Commands
 

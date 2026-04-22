@@ -1,0 +1,69 @@
+---
+// Rendered, not screenshotted — stays crisp at every DPI and is copy-pasteable.
+---
+
+<section class="relative">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+    <div class="mb-8 max-w-2xl">
+      <p class="text-xs uppercase tracking-wider text-accent">API</p>
+      <h2 class="mt-2 text-3xl font-semibold tracking-tight text-ink-50 sm:text-4xl">
+        Sample query.
+      </h2>
+      <p class="mt-4 text-ink-400">
+        Queries are cursor-paginated; timestamps are UTC; each row is tagged
+        <code class="font-mono text-sm text-ink-300">raw</code> or
+        <code class="font-mono text-sm text-ink-300">derived</code>.
+      </p>
+    </div>
+
+    <div class="overflow-hidden rounded-lg border border-ink-800 bg-ink-900/70 font-mono text-[13px]">
+      <div class="flex items-center gap-2 border-b border-ink-800 px-4 py-2 text-xs text-ink-500">
+        <span class="inline-block h-2 w-2 rounded-full bg-ink-700"></span>
+        <span class="inline-block h-2 w-2 rounded-full bg-ink-700"></span>
+        <span class="inline-block h-2 w-2 rounded-full bg-ink-700"></span>
+        <span class="ml-3">GET /api/query?instrument=XAUUSD&amp;timeframe=D1&amp;limit=3</span>
+      </div>
+      <pre class="overflow-x-auto p-5 leading-relaxed text-ink-200"><code>{`{
+  "instrument": "XAUUSD",
+  "timeframe": "D1",
+  "count": 3,
+  "next_cursor": "eyJ0cyI6IjIwMjUtMTEtMDMifQ==",
+  "rows": [
+    {
+      "timestamp": "2025-11-03T00:00:00Z",
+      "open":  3987.12,
+      "high":  4021.88,
+      "low":   3971.05,
+      "close": 4014.60,
+      "volume": 128334,
+      "source": "raw"
+    },
+    {
+      "timestamp": "2025-11-04T00:00:00Z",
+      "open":  4014.60,
+      "high":  4055.20,
+      "low":   4002.15,
+      "close": 4048.73,
+      "volume": 142019,
+      "source": "raw"
+    },
+    {
+      "timestamp": "2025-11-05T00:00:00Z",
+      "open":  4048.73,
+      "high":  4071.40,
+      "low":   4031.90,
+      "close": 4060.25,
+      "volume": 117445,
+      "source": "derived"
+    }
+  ]
+}`}</code></pre>
+    </div>
+
+    <p class="mt-4 text-xs text-ink-500">
+      Row-level queries require an API key. The
+      <a href="#stats" class="underline decoration-ink-700 underline-offset-2 hover:text-ink-300">stats above</a>
+      come from an aggregate-only public endpoint — no row content is exposed without auth.
+    </p>
+  </div>
+</section>

@@ -13,6 +13,6 @@ EnvironmentFile=/etc/datalake/api-key
 ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 300 \
     -X POST \
     -H "X-API-Key: ${API_KEY}" \
-    "https://datalake.lucasguerin.fr/backup/run?keep=8"
+    "https://datalake.lucasguerin.fr/api/backup/run?keep=8"
 StandardOutput=journal
 StandardError=journal

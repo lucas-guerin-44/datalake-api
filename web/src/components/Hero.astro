@@ -1,0 +1,65 @@
+---
+const repoUrl = "https://github.com/lucasguerin/datalake-api";
+---
+
+<section class="relative overflow-hidden">
+  <div class="absolute inset-0 bg-grid mask-fade-b opacity-60" aria-hidden="true"></div>
+  <div
+    class="absolute left-1/2 top-20 -z-10 h-[32rem] w-[32rem] -translate-x-1/2 rounded-full bg-accent/10 blur-3xl"
+    aria-hidden="true"
+  ></div>
+
+  <nav class="relative mx-auto flex max-w-6xl items-center justify-between px-6 pt-8">
+    <a href="/" class="flex items-center gap-2 text-sm font-medium tracking-tight">
+      <span class="inline-block h-2 w-2 rounded-full bg-accent"></span>
+      <span class="text-ink-200">Lucas Guerin</span>
+      <span class="text-ink-500">/</span>
+      <span class="text-ink-300">datalake</span>
+    </a>
+    <div class="flex items-center gap-6 text-sm text-ink-300">
+      <a href="#architecture" class="hover:text-ink-100 transition-colors">Architecture</a>
+      <a href="#stack" class="hover:text-ink-100 transition-colors">Stack</a>
+      <a href={repoUrl} target="_blank" rel="noopener" class="rounded-md border border-ink-700 px-3 py-1.5 hover:border-ink-500 hover:text-ink-100 transition-colors">
+        GitHub →
+      </a>
+    </div>
+  </nav>
+
+  <div class="relative mx-auto max-w-6xl px-6 pt-28 pb-20 sm:pt-36 sm:pb-28">
+    <p class="mb-6 inline-flex items-center gap-2 rounded-full border border-ink-800 bg-ink-900/70 px-3 py-1 text-xs text-ink-300 backdrop-blur">
+      <span class="relative inline-flex h-2 w-2">
+        <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60 opacity-75"></span>
+        <span class="relative inline-flex h-2 w-2 rounded-full bg-accent"></span>
+      </span>
+      Live
+    </p>
+    <h1 class="max-w-4xl text-4xl font-semibold tracking-tight text-ink-50 sm:text-6xl sm:leading-[1.05]">
+      A personal warehouse for
+      <span class="text-accent">market data.</span>
+    </h1>
+    <p class="mt-6 max-w-2xl text-lg text-ink-300">
+      FX, metals, indices, commodities, crypto — OHLC bars and tick data imported
+      from MetaTrader 5, stored in DuckDB, and served over a FastAPI layer with
+      cursor-paginated queries, Parquet backups, and a WebSocket endpoint for
+      historical replay.
+    </p>
+
+    <div class="mt-10 flex flex-wrap items-center gap-3">
+      <a
+        href={repoUrl}
+        target="_blank"
+        rel="noopener"
+        class="inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-ink-950 hover:bg-accent/90 transition-colors"
+      >
+        View on GitHub
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
+      </a>
+      <a
+        href="#architecture"
+        class="inline-flex items-center gap-2 rounded-md border border-ink-700 px-4 py-2 text-sm text-ink-200 hover:border-ink-500 hover:text-ink-100 transition-colors"
+      >
+        How it works
+      </a>
+    </div>
+  </div>
+</section>

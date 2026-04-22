@@ -46,13 +46,26 @@ else
     echo ">> skipping build, using preloaded image ${IMAGE}"
 fi
 
+echo ">> building web image (static landing)"
+# The API image is built by this host-loaded tag, but the web service is
+# defined with `build:` in docker-compose.prod.yml — rebuild it each deploy so
+# landing-page changes picked up in `git pull` ship.
+docker compose -f docker-compose.prod.yml build web
+
 echo ">> bringing up prod stack (API_IMAGE=${IMAGE})"
 API_IMAGE="${IMAGE}" docker compose -f docker-compose.prod.yml up -d
 
 echo ">> healthcheck"
 sleep 5
-if ! curl -fsS http://127.0.0.1/healthcheck > /dev/null; then
-    echo "WARNING: healthcheck failed. Check 'docker compose logs api'."
+# Caddy now serves the landing page at / and the API under /api/*. The API
+# liveness endpoint is /api/healthcheck through the edge; /healthcheck on :80
+# would hit the static site and return HTML.
+if ! curl -fsS http://127.0.0.1/api/healthcheck > /dev/null; then
+    echo "WARNING: API healthcheck failed. Check 'docker compose logs api'."
+    exit 1
+fi
+if ! curl -fsS -o /dev/null http://127.0.0.1/; then
+    echo "WARNING: landing page unreachable. Check 'docker compose logs web caddy'."
     exit 1
 fi
 

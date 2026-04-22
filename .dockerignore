@@ -39,3 +39,8 @@ pytest.ini
 # CI/tooling
 .claude/
 .beads/
+
+# Landing site build artefacts — rebuilt inside web.Dockerfile
+web/node_modules/
+web/dist/
+web/.astro/

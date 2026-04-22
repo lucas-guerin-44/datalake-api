@@ -1,0 +1,121 @@
+---
+// Fetched client-side from /api/public/stats. Data is cached 60s on the server,
+// so multiple tabs and refreshes don't hit DuckDB hard.
+---
+
+<section id="stats" class="relative border-y border-ink-800/80 bg-ink-900/30">
+  <div class="mx-auto max-w-6xl px-6 py-14">
+    <div class="mb-8 flex items-end justify-between">
+      <h2 class="text-xl font-semibold text-ink-100">Current coverage</h2>
+      <p class="text-xs text-ink-500" data-stats-refresh>
+        <span class="opacity-60">updated</span>
+        <span data-stats-refresh-value>—</span>
+      </p>
+    </div>
+
+    <div class="grid grid-cols-2 gap-6 sm:grid-cols-4">
+      <div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">Total rows</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-counter="0">0</div>
+        <div class="mt-1 text-xs text-ink-500">OHLC + ticks</div>
+      </div>
+      <div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">Instruments</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-counter="0">0</div>
+        <div class="mt-1 text-xs text-ink-500">FX, metals, indices, crypto, commodities</div>
+      </div>
+      <div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">Timeframes</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-timeframe-count>0</div>
+        <div class="mt-1 text-xs text-ink-500 truncate" data-timeframes>M1 → D1 + TICK</div>
+      </div>
+      <div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">Date range</div>
+        <div class="mt-1 font-mono text-xl text-ink-50 sm:text-2xl tabular-nums" data-date-range>— → —</div>
+        <div class="mt-1 text-xs text-ink-500">UTC</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script is:inline>
+(function () {
+  const formatNumber = (n) => {
+    if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + "B";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+    return String(n);
+  };
+
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+  function countUp(el, target, duration) {
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      const v = Math.round(target * easeOutCubic(t));
+      el.textContent = formatNumber(v);
+      if (t < 1) requestAnimationFrame(tick);
+      else el.textContent = formatNumber(target);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "—";
+    try {
+      return new Date(iso).toISOString().slice(0, 10);
+    } catch {
+      return "—";
+    }
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return "—";
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return "—";
+    const delta = Math.max(0, Date.now() - then);
+    const s = Math.round(delta / 1000);
+    if (s < 60) return s + "s ago";
+    const m = Math.round(s / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.round(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.round(h / 24) + "d ago";
+  }
+
+  async function render() {
+    const counters = document.querySelectorAll("[data-counter]");
+    const tfCount = document.querySelector("[data-timeframe-count]");
+    const tfList = document.querySelector("[data-timeframes]");
+    const range = document.querySelector("[data-date-range]");
+    const refreshEl = document.querySelector("[data-stats-refresh-value]");
+
+    try {
+      const res = await fetch("/api/public/stats", { headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error("status " + res.status);
+      const data = await res.json();
+
+      const totals = [data.total_rows ?? 0, data.instruments ?? 0];
+      counters.forEach((el, i) => countUp(el, totals[i] ?? 0, 1200));
+
+      if (tfCount) tfCount.textContent = String((data.timeframes || []).length);
+      if (tfList) tfList.textContent = (data.timeframes || []).join(" · ") || "—";
+      if (range) {
+        range.textContent =
+          formatDate(data.date_range?.start) + " → " + formatDate(data.date_range?.end);
+      }
+      if (refreshEl) refreshEl.textContent = relativeTime(data.last_refresh);
+    } catch (err) {
+      counters.forEach((el) => (el.textContent = "—"));
+      if (refreshEl) refreshEl.textContent = "unavailable";
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", render, { once: true });
+  } else {
+    render();
+  }
+})();
+</script>

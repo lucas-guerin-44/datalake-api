@@ -13,26 +13,32 @@
       </p>
     </div>
 
+    <!--
+      Pre-filled with reasonable last-known-good values so the strip never
+      renders as an empty skeleton. On page load the fetch replaces them with
+      live numbers; if the fetch fails these stay and the refresh stamp reads
+      "stats unavailable".
+    -->
     <div class="grid grid-cols-2 gap-6 sm:grid-cols-4">
       <div>
-        <div class="text-[11px] uppercase tracking-wider text-ink-500">Total rows</div>
-        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-counter="0">0</div>
-        <div class="mt-1 text-xs text-ink-500">OHLC + ticks</div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">On disk</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-disk>~4 GB</div>
+        <div class="mt-1 text-xs text-ink-500" data-disk-sub>DuckDB, compressed</div>
       </div>
       <div>
         <div class="text-[11px] uppercase tracking-wider text-ink-500">Instruments</div>
-        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-counter="0">0</div>
-        <div class="mt-1 text-xs text-ink-500">FX, metals, indices, crypto, commodities</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-counter>73</div>
+        <div class="mt-1 text-xs text-ink-500">across asset classes</div>
       </div>
       <div>
         <div class="text-[11px] uppercase tracking-wider text-ink-500">Timeframes</div>
-        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-timeframe-count>0</div>
-        <div class="mt-1 text-xs text-ink-500 truncate" data-timeframes>M1 → D1 + TICK</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-timeframe-count>8</div>
+        <div class="mt-1 text-xs text-ink-500">M1 → D1, plus ticks</div>
       </div>
       <div>
-        <div class="text-[11px] uppercase tracking-wider text-ink-500">Date range</div>
-        <div class="mt-1 font-mono text-xl text-ink-50 sm:text-2xl tabular-nums" data-date-range>— → —</div>
-        <div class="mt-1 text-xs text-ink-500">UTC</div>
+        <div class="text-[11px] uppercase tracking-wider text-ink-500">Years of coverage</div>
+        <div class="mt-1 font-mono text-3xl text-ink-50 sm:text-4xl tabular-nums" data-years>25</div>
+        <div class="mt-1 text-xs text-ink-500" data-years-sub>2000-07-16 → 2026-04-20</div>
       </div>
     </div>
   </div>
@@ -40,6 +46,14 @@
 
 <script is:inline>
 (function () {
+  // Fallback values that render immediately in the HTML. If the fetch below
+  // fails, the page keeps showing these rather than an empty skeleton.
+  // Count-up animations interpolate FROM these to the live numbers.
+  const FALLBACK = {
+    instruments: 73,
+    timeframes_count: 8,
+  };
+
   const formatNumber = (n) => {
     if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + "B";
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
@@ -47,13 +61,34 @@
     return String(n);
   };
 
+  const formatBytes = (n) => {
+    if (n == null) return "—";
+    if (n >= 1024 ** 4) return (n / 1024 ** 4).toFixed(2) + " TB";
+    if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GB";
+    if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+    return n + " B";
+  };
+
+  const yearsBetween = (startIso, endIso) => {
+    if (!startIso || !endIso) return null;
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+    return (end - start) / (365.25 * 24 * 3600 * 1000);
+  };
+
   const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 
-  function countUp(el, target, duration) {
+  function countUp(el, target, duration, fromValue = 0) {
+    if (fromValue === target) {
+      el.textContent = formatNumber(target);
+      return;
+    }
     const start = performance.now();
     const tick = (now) => {
       const t = Math.min(1, (now - start) / duration);
-      const v = Math.round(target * easeOutCubic(t));
+      const v = Math.round(fromValue + (target - fromValue) * easeOutCubic(t));
       el.textContent = formatNumber(v);
       if (t < 1) requestAnimationFrame(tick);
       else el.textContent = formatNumber(target);
@@ -87,8 +122,10 @@
   async function render() {
     const counters = document.querySelectorAll("[data-counter]");
     const tfCount = document.querySelector("[data-timeframe-count]");
-    const tfList = document.querySelector("[data-timeframes]");
-    const range = document.querySelector("[data-date-range]");
+    const diskEl = document.querySelector("[data-disk]");
+    const diskSubEl = document.querySelector("[data-disk-sub]");
+    const yearsEl = document.querySelector("[data-years]");
+    const yearsSubEl = document.querySelector("[data-years-sub]");
     const refreshEl = document.querySelector("[data-stats-refresh-value]");
 
     try {
@@ -96,19 +133,34 @@
       if (!res.ok) throw new Error("status " + res.status);
       const data = await res.json();
 
-      const totals = [data.total_rows ?? 0, data.instruments ?? 0];
-      counters.forEach((el, i) => countUp(el, totals[i] ?? 0, 1200));
+      // Instruments — animate from fallback to live (small jump most of the time).
+      const liveInstruments = data.instruments ?? FALLBACK.instruments;
+      counters.forEach((el) => countUp(el, liveInstruments, 1200, FALLBACK.instruments));
 
-      if (tfCount) tfCount.textContent = String((data.timeframes || []).length);
-      if (tfList) tfList.textContent = (data.timeframes || []).join(" · ") || "—";
-      if (range) {
-        range.textContent =
-          formatDate(data.date_range?.start) + " → " + formatDate(data.date_range?.end);
+      const tfCountLive = (data.timeframes || []).length || FALLBACK.timeframes_count;
+      if (tfCount) tfCount.textContent = String(tfCountLive);
+
+      // Only overwrite disk/years if the API actually returned usable values.
+      // Null or malformed → leave the static fallback in place.
+      if (diskEl && data.disk_bytes != null) {
+        diskEl.textContent = formatBytes(data.disk_bytes);
       }
+      if (diskSubEl && data.total_rows != null) {
+        diskSubEl.textContent = formatNumber(data.total_rows) + " rows, compressed";
+      }
+
+      const years = yearsBetween(data.date_range?.start, data.date_range?.end);
+      if (yearsEl && years != null) yearsEl.textContent = years.toFixed(1);
+      if (yearsSubEl && data.date_range?.start && data.date_range?.end) {
+        yearsSubEl.textContent =
+          formatDate(data.date_range.start) + " → " + formatDate(data.date_range.end);
+      }
+
       if (refreshEl) refreshEl.textContent = relativeTime(data.last_refresh);
     } catch (err) {
-      counters.forEach((el) => (el.textContent = "—"));
-      if (refreshEl) refreshEl.textContent = "unavailable";
+      // Fetch failed — leave every value at its HTML fallback. Only signal
+      // that the numbers aren't fresh via the refresh stamp.
+      if (refreshEl) refreshEl.textContent = "stats unavailable";
     }
   }
 

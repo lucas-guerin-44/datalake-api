@@ -9,12 +9,14 @@ widen this surface.
 
 Cached server-side so a hot-loop can't pound DuckDB.
 """
+import os
 import threading
 import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 
+from src.config import DUCKDB_PATH
 from src.core.datalake import get_db_connection
 from src.middleware.logging_config import get_logger
 from src.middleware.ratelimit import limiter
@@ -25,6 +27,9 @@ router = APIRouter()
 _CACHE_TTL_SECONDS = 60
 _cache_lock = threading.Lock()
 _cache: dict = {"expires_at": 0.0, "value": None}
+
+# Canonical chronological order for timeframes; anything unknown falls to the end.
+_TIMEFRAME_ORDER = {"M1": 0, "M5": 1, "M15": 2, "M30": 3, "H1": 4, "H4": 5, "D1": 6, "W1": 7, "MN1": 8, "TICK": 99}
 
 
 def _compute_stats() -> dict:
@@ -37,13 +42,14 @@ def _compute_stats() -> dict:
             "  UNION SELECT instrument FROM tick_data"
             ")"
         ).fetchone()[0]
-        timeframes = [
+        raw_timeframes = [
             r[0] for r in con.execute(
-                "SELECT DISTINCT timeframe FROM ohlc_data ORDER BY timeframe"
+                "SELECT DISTINCT timeframe FROM ohlc_data"
             ).fetchall()
         ]
         if tick_rows > 0:
-            timeframes.append("TICK")
+            raw_timeframes.append("TICK")
+        timeframes = sorted(raw_timeframes, key=lambda t: _TIMEFRAME_ORDER.get(t, 50))
 
         ohlc_range = con.execute(
             "SELECT MIN(timestamp), MAX(timestamp) FROM ohlc_data"
@@ -57,6 +63,11 @@ def _compute_stats() -> dict:
     start = min(mins).isoformat() if mins else None
     end = max(maxs).isoformat() if maxs else None
 
+    try:
+        disk_bytes = os.path.getsize(DUCKDB_PATH)
+    except OSError:
+        disk_bytes = None
+
     return {
         "ohlc_rows": ohlc_rows,
         "tick_rows": tick_rows,
@@ -64,6 +75,7 @@ def _compute_stats() -> dict:
         "instruments": instrument_count,
         "timeframes": timeframes,
         "date_range": {"start": start, "end": end},
+        "disk_bytes": disk_bytes,
         "last_refresh": datetime.now(timezone.utc).isoformat(),
         "cache_ttl_seconds": _CACHE_TTL_SECONDS,
     }

@@ -1,13 +1,16 @@
 ---
+// Each tool has a dominant brand-ish colour. Shown as a fixed radial aura
+// (center of the card, not cursor-tracking) that fades in on hover, with a
+// tiled SVG noise overlay to stop it feeling plasticky.
 const items = [
-  { name: "FastAPI", role: "REST + WebSocket API" },
-  { name: "DuckDB", role: "OHLC + tick storage" },
-  { name: "PostgreSQL", role: "users + API keys" },
-  { name: "Caddy", role: "TLS reverse proxy" },
-  { name: "Docker Compose", role: "container orchestration" },
-  { name: "Wine", role: "runs MT5 on Linux" },
-  { name: "systemd + fail2ban", role: "ops on the host" },
-  { name: "Hetzner", role: "VPS" },
+  { name: "FastAPI",             role: "REST + WebSocket API",    color: "#009688" },
+  { name: "DuckDB",              role: "OHLC + tick storage",     color: "#F4C430" },
+  { name: "PostgreSQL",          role: "users + API keys",        color: "#336791" },
+  { name: "Caddy",               role: "TLS reverse proxy",       color: "#30D094" },
+  { name: "Docker Compose",      role: "container orchestration", color: "#2496ED" },
+  { name: "Wine",                role: "runs MT5 on Linux",       color: "#7B1F1F" },
+  { name: "systemd + fail2ban",  role: "ops on the host",         color: "#E3542D" },
+  { name: "Hetzner",             role: "VPS",                     color: "#D50C2D" },
 ];
 ---
 
@@ -21,11 +24,67 @@ const items = [
     </div>
     <ul class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-800 bg-ink-800 sm:grid-cols-4">
       {items.map((it) => (
-        <li class="bg-ink-900 p-5">
-          <div class="font-medium text-ink-100">{it.name}</div>
-          <div class="mt-1 text-xs text-ink-500">{it.role}</div>
+        <li class="stack-card relative overflow-hidden bg-ink-900 p-5" style={`--aura: ${it.color}`}>
+          <div class="relative z-10">
+            <div class="font-medium text-ink-100 transition-colors">{it.name}</div>
+            <div class="mt-1 text-xs text-ink-500 transition-colors">{it.role}</div>
+          </div>
         </li>
       ))}
     </ul>
   </div>
 </section>
+
+<style>
+  .stack-card::before,
+  .stack-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 500ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* The coloured aura: the radial origin sits BELOW the card's bottom edge
+     so the glow reads as light spilling up from underneath rather than a
+     point-source inside. Ellipse stretches it wider-than-tall for a gentler
+     fall-off across the width. Multiple stops + heavy blur = smooth. */
+  .stack-card::before {
+    background: radial-gradient(
+      ellipse 140% 110% at 50% 118%,
+      color-mix(in srgb, var(--aura) 95%, transparent) 0%,
+      color-mix(in srgb, var(--aura) 70%, transparent) 18%,
+      color-mix(in srgb, var(--aura) 40%, transparent) 40%,
+      color-mix(in srgb, var(--aura) 15%, transparent) 65%,
+      transparent 88%
+    );
+    filter: blur(28px);
+    z-index: 0;
+  }
+
+  /* SVG noise layer — feTurbulence at high frequency gives the grainy
+     texture; the feColorMatrix collapses it to grey and dials alpha. */
+  .stack-card::after {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    background-size: 160px 160px;
+    mix-blend-mode: overlay;
+    z-index: 1;
+  }
+
+  .stack-card:hover::before {
+    opacity: 0.75;
+  }
+  .stack-card:hover::after {
+    opacity: 0.22;
+  }
+
+  /* Reduced motion: skip the fade transition entirely. The aura still
+     appears on hover, it just snaps instead of easing. */
+  @media (prefers-reduced-motion: reduce) {
+    .stack-card::before,
+    .stack-card::after {
+      transition: none;
+    }
+  }
+</style>

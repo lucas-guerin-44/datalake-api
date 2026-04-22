@@ -133,12 +133,17 @@ async def ingest_file_api(
 
 @router.post("/ingest-batch")
 async def ingest_batch_api(
-    folder: Path = Form(DEFAULT_STAGING),
     derive: bool = Form(True, description="Auto-derive higher timeframes from the ingested window"),
     current_user: User = Depends(ScopedAuth("write")),
 ):
-    """Ingest all CSV/Excel files in a folder. Requires write scope."""
-    files = sorted([p for p in folder.iterdir() if p.suffix.lower() in {".csv", ".xlsx", ".xls"}])
+    """
+    Ingest all CSV/Excel files in the staging directory. Requires write scope.
+
+    The folder is hardcoded to DEFAULT_STAGING — we used to accept it as a form
+    parameter, but that let a write-scoped caller iterate any container-readable
+    directory. Drop files into `staging/` (bind-mounted on the VPS) instead.
+    """
+    files = sorted([p for p in DEFAULT_STAGING.iterdir() if p.suffix.lower() in {".csv", ".xlsx", ".xls"}])
     if not files:
         return {"status": "empty", "message": "No files found"}
 
@@ -199,12 +204,14 @@ async def ingest_tick_file_api(
 
 @router.post("/ingest-batch/ticks")
 async def ingest_tick_batch_api(
-    folder: Path = Form(DEFAULT_STAGING),
     derive: bool = Form(True, description="Auto-derive OHLC bars (M1..D1) from the ingested ticks"),
     current_user: User = Depends(ScopedAuth("write")),
 ):
-    """Ingest all tick CSV files matching {INSTRUMENT}_TICK_*.csv from a folder. Requires write scope."""
-    files = sorted([p for p in folder.iterdir() if p.suffix.lower() == ".csv" and "_TICK_" in p.name.upper()])
+    """
+    Ingest all tick CSV files matching {INSTRUMENT}_TICK_*.csv from the staging
+    directory. Requires write scope. Folder is hardcoded — see /ingest-batch.
+    """
+    files = sorted([p for p in DEFAULT_STAGING.iterdir() if p.suffix.lower() == ".csv" and "_TICK_" in p.name.upper()])
     if not files:
         return {"status": "empty", "message": "No tick files found"}
 

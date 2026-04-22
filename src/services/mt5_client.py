@@ -25,10 +25,17 @@ logger = get_logger(__name__)
 
 MT5_BRIDGE_URL = os.getenv("MT5_BRIDGE_URL", "http://host.docker.internal:18812").rstrip("/")
 MT5_BRIDGE_TIMEOUT = int(os.getenv("MT5_BRIDGE_TIMEOUT", "120"))
+# Shared secret sent on every bridge call. The bridge refuses requests without it
+# (or with a wrong value). Empty string = auth disabled (dev only).
+MT5_BRIDGE_KEY = os.getenv("MT5_BRIDGE_KEY", "")
 
 
 class MT5BridgeError(RuntimeError):
     """Raised when the Wine bridge is unreachable or returns an error."""
+
+
+def _auth_headers() -> dict:
+    return {"X-Bridge-Key": MT5_BRIDGE_KEY} if MT5_BRIDGE_KEY else {}
 
 
 def _post(path: str, payload: dict) -> dict:
@@ -36,7 +43,7 @@ def _post(path: str, payload: dict) -> dict:
     body = json.dumps(payload).encode("utf-8")
     req = urlrequest.Request(
         url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers()},
     )
     try:
         with urlrequest.urlopen(req, timeout=MT5_BRIDGE_TIMEOUT) as resp:
@@ -51,7 +58,8 @@ def _post(path: str, payload: dict) -> dict:
 def ping() -> bool:
     """Return True if the bridge is reachable."""
     try:
-        with urlrequest.urlopen(f"{MT5_BRIDGE_URL}/ping", timeout=5) as resp:
+        req = urlrequest.Request(f"{MT5_BRIDGE_URL}/ping", headers=_auth_headers())
+        with urlrequest.urlopen(req, timeout=5) as resp:
             return resp.status == 200
     except (URLError, HTTPError):
         return False

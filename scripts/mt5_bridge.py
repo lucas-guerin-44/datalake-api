@@ -16,8 +16,10 @@ The FastAPI container reaches this via host.docker.internal:18812
 Stdlib-only on purpose - no extra deps beyond MetaTrader5 itself.
 """
 import argparse
+import hmac
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -26,6 +28,12 @@ try:
 except ImportError:
     print("FATAL: MetaTrader5 package not installed (this script must run inside Wine-Python)")
     raise
+
+
+# Shared secret required on every incoming request (X-Bridge-Key header).
+# Empty = auth disabled (dev only). On the VPS this is set via systemd
+# EnvironmentFile so it matches MT5_BRIDGE_KEY on the API container side.
+BRIDGE_KEY = os.getenv("MT5_BRIDGE_KEY", "")
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -90,13 +98,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authed(self) -> bool:
+        """True if BRIDGE_KEY is unset OR the request carries a matching X-Bridge-Key."""
+        if not BRIDGE_KEY:
+            return True
+        supplied = self.headers.get("X-Bridge-Key", "")
+        return hmac.compare_digest(supplied, BRIDGE_KEY)
+
     def do_GET(self):
+        if not self._authed():
+            self._send_json(401, {"error": "unauthorized"})
+            return
         if self.path == "/ping":
             self._send_json(200, {"status": "ok", "mt5_initialized": bool(mt5.terminal_info())})
             return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authed():
+            self._send_json(401, {"error": "unauthorized"})
+            return
         if self.path != "/bars":
             self._send_json(404, {"error": "not found"})
             return
@@ -131,7 +152,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     _ensure_mt5()
-    log.info("MT5 initialized. Listening on %s:%d", args.host, args.port)
+    auth_state = "enabled" if BRIDGE_KEY else "DISABLED (set MT5_BRIDGE_KEY)"
+    log.info("MT5 initialized. Listening on %s:%d (auth: %s)", args.host, args.port, auth_state)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:

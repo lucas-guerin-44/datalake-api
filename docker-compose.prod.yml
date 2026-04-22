@@ -79,6 +79,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Access log is written here so fail2ban on the host can tail it.
+      - /var/log/caddy:/var/log/caddy
     depends_on:
       - api
     restart: unless-stopped

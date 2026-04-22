@@ -71,8 +71,8 @@ test:
 # Compose/Caddy changes are picked up by `git pull` on the remote, so commit+push first.
 deploy:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host (e.g. make deploy VPS=datalake@datalake.lucasguerin.fr)" >&2; exit 2; }
-	@git update-index --refresh > /dev/null 2>&1 || true
-	@git diff-index --quiet HEAD -- || { echo "Error: uncommitted changes in working tree. Commit or stash first." >&2; exit 2; }
+	@DIRTY=$$(git status --porcelain); \
+	 if [ -n "$$DIRTY" ]; then echo "Error: uncommitted changes in working tree. Commit or stash first." >&2; echo "$$DIRTY" >&2; exit 2; fi
 	@SHA=$$(git rev-parse --short HEAD); \
 	 IMAGE=datalake-api:$$SHA; \
 	 echo ">> [local] building $$IMAGE"; \
@@ -87,10 +87,10 @@ deploy:
 
 deploy-check:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host" >&2; exit 2; }
-	@git update-index --refresh > /dev/null 2>&1 || true
 	@SHA=$$(git rev-parse --short HEAD); \
 	 echo "Would build:   datalake-api:$$SHA"; \
 	 echo "Would ship to: $(VPS):$(REMOTE_PATH)"; \
-	 git diff-index --quiet HEAD -- && echo "Working tree: clean" || echo "Working tree: DIRTY (deploy will refuse)"; \
+	 DIRTY=$$(git status --porcelain); \
+	 if [ -z "$$DIRTY" ]; then echo "Working tree: clean"; else echo "Working tree: DIRTY (deploy will refuse):"; echo "$$DIRTY"; fi; \
 	 UNPUSHED=$$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l); \
 	 if [ "$$UNPUSHED" -gt 0 ]; then echo "WARNING: $$UNPUSHED commit(s) not pushed — remote git pull won't see them"; fi

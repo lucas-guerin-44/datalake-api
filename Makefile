@@ -71,8 +71,13 @@ test:
 # Compose/Caddy changes are picked up by `git pull` on the remote, so commit+push first.
 deploy:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host (e.g. make deploy VPS=datalake@datalake.lucasguerin.fr)" >&2; exit 2; }
-	@DIRTY=$$(git status --porcelain); \
-	 if [ -n "$$DIRTY" ]; then echo "Error: uncommitted changes in working tree. Commit or stash first." >&2; echo "$$DIRTY" >&2; exit 2; fi
+	@# --ignore-cr-at-eol tolerates core.autocrlf phantom diffs on Windows;
+	@# untracked files are ignored here — the real intent is "no unstaged content diffs vs HEAD".
+	@if ! git diff --quiet --ignore-cr-at-eol HEAD -- 2>/dev/null; then \
+	     echo "Error: uncommitted content changes vs HEAD. Commit or stash first." >&2; \
+	     git diff --name-only --ignore-cr-at-eol HEAD -- >&2; \
+	     exit 2; \
+	 fi
 	@SHA=$$(git rev-parse --short HEAD); \
 	 IMAGE=datalake-api:$$SHA; \
 	 echo ">> [local] building $$IMAGE"; \
@@ -90,7 +95,11 @@ deploy-check:
 	@SHA=$$(git rev-parse --short HEAD); \
 	 echo "Would build:   datalake-api:$$SHA"; \
 	 echo "Would ship to: $(VPS):$(REMOTE_PATH)"; \
-	 DIRTY=$$(git status --porcelain); \
-	 if [ -z "$$DIRTY" ]; then echo "Working tree: clean"; else echo "Working tree: DIRTY (deploy will refuse):"; echo "$$DIRTY"; fi; \
+	 if git diff --quiet --ignore-cr-at-eol HEAD -- 2>/dev/null; then \
+	     echo "Working tree: clean"; \
+	 else \
+	     echo "Working tree: DIRTY (deploy will refuse):"; \
+	     git diff --name-only --ignore-cr-at-eol HEAD --; \
+	 fi; \
 	 UNPUSHED=$$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l); \
 	 if [ "$$UNPUSHED" -gt 0 ]; then echo "WARNING: $$UNPUSHED commit(s) not pushed — remote git pull won't see them"; fi

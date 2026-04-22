@@ -71,6 +71,7 @@ test:
 # Compose/Caddy changes are picked up by `git pull` on the remote, so commit+push first.
 deploy:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host (e.g. make deploy VPS=datalake@datalake.lucasguerin.fr)" >&2; exit 2; }
+	@git update-index --refresh > /dev/null 2>&1 || true
 	@git diff-index --quiet HEAD -- || { echo "Error: uncommitted changes in working tree. Commit or stash first." >&2; exit 2; }
 	@SHA=$$(git rev-parse --short HEAD); \
 	 IMAGE=datalake-api:$$SHA; \
@@ -86,6 +87,7 @@ deploy:
 
 deploy-check:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host" >&2; exit 2; }
+	@git update-index --refresh > /dev/null 2>&1 || true
 	@SHA=$$(git rev-parse --short HEAD); \
 	 echo "Would build:   datalake-api:$$SHA"; \
 	 echo "Would ship to: $(VPS):$(REMOTE_PATH)"; \

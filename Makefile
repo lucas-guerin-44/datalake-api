@@ -95,8 +95,8 @@ deploy:
 	 docker save "$$IMAGE" | gzip | $(SSH) $(VPS) "gunzip | docker load" && \
 	 echo ">> [remote] git pull (compose/Caddy/migrations)" && \
 	 $(SSH) $(VPS) "cd $(REMOTE_PATH) && git pull --ff-only" && \
-	 echo ">> [remote] API_IMAGE=$$IMAGE ./deploy/deploy.sh --no-pull --skip-build" && \
-	 $(SSH) $(VPS) "cd $(REMOTE_PATH) && API_IMAGE=$$IMAGE ./deploy/deploy.sh --no-pull --skip-build" && \
+	 echo ">> [remote] API_IMAGE=$$IMAGE bash deploy/deploy.sh --no-pull --skip-build" && \
+	 $(SSH) $(VPS) "cd $(REMOTE_PATH) && API_IMAGE=$$IMAGE bash deploy/deploy.sh --no-pull --skip-build" && \
 	 echo ">> deployed $$IMAGE to $(VPS)"
 
 deploy-check:

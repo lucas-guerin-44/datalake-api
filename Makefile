@@ -80,8 +80,12 @@ test:
 # Compose/Caddy changes are picked up by `git pull` on the remote, so commit+push first.
 deploy:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host (e.g. make deploy VPS=datalake@datalake.lucasguerin.fr)" >&2; exit 2; }
-	@# --ignore-cr-at-eol tolerates core.autocrlf phantom diffs on Windows;
-	@# untracked files are ignored here — the real intent is "no unstaged content diffs vs HEAD".
+	@# Refresh git's stat cache first — otherwise files that were touched
+	@# (IDE save, Tailwind rewrite, autocrlf flip) but not content-changed can
+	@# show as dirty until the next `git status` is run. --ignore-cr-at-eol
+	@# then handles genuine CRLF-only diffs. Untracked files are ignored here —
+	@# the real intent is "no unstaged content diffs vs HEAD".
+	@git update-index --refresh >/dev/null 2>&1 || true
 	@if ! git diff --quiet --ignore-cr-at-eol HEAD -- 2>/dev/null; then \
 	     echo "Error: uncommitted content changes vs HEAD. Commit or stash first." >&2; \
 	     git diff --name-only --ignore-cr-at-eol HEAD -- >&2; \
@@ -101,6 +105,7 @@ deploy:
 
 deploy-check:
 	@[ -n "$(VPS)" ] || { echo "Error: set VPS=user@host" >&2; exit 2; }
+	@git update-index --refresh >/dev/null 2>&1 || true
 	@SHA=$$(git rev-parse --short HEAD); \
 	 echo "Would build:   datalake-api:$$SHA"; \
 	 echo "Would ship to: $(VPS):$(REMOTE_PATH)"; \

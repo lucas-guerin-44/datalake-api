@@ -24,7 +24,12 @@ datalake.lucasguerin.fr {
 	}
 
 	log {
-		output stdout
+		# File output so fail2ban can tail it. Also still available via
+		# `docker compose logs caddy` because Caddy tees to stderr on errors.
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
 		# Redact credential-bearing query params before they're written to disk.
 		# Belt-and-braces with middleware.py — the server now refuses these query
 		# params entirely, but keep this so a future regression can't leak keys.

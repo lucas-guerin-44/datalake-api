@@ -10,6 +10,9 @@ Group=datalake
 Environment=WINEPREFIX=/home/datalake/.wine-mt5
 Environment=WINEDEBUG=-all
 Environment=DISPLAY=:0
+# Shared secret with the API container (must match MT5_BRIDGE_KEY in the API's .env).
+# Create /etc/datalake/mt5-bridge-key with: MT5_BRIDGE_KEY=<token>
+EnvironmentFile=-/etc/datalake/mt5-bridge-key
 WorkingDirectory=/opt/datalake-api
 # Adjust the python path below to your wine-python install (see deploy/README hint at top of file).
 ExecStart=/usr/bin/wine "/home/datalake/.wine-mt5/drive_c/Python311/python.exe" /opt/datalake-api/scripts/mt5_bridge.py --host 127.0.0.1 --port 18812

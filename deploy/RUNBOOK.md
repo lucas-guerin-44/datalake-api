@@ -252,6 +252,28 @@ curl http://127.0.0.1:18812/ping
 
 ## 8. MT5 bridge as a systemd service
 
+### Generate a shared secret for the bridge
+
+The bridge accepts unauthenticated callers only if `MT5_BRIDGE_KEY` is empty.
+In prod, set one — the API container sends it in `X-Bridge-Key` on every call.
+Anything else on localhost (a pivoted attacker, a stray cron, etc.) gets 401.
+
+```bash
+BRIDGE_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+
+# Server side — read by the systemd unit via EnvironmentFile
+sudo mkdir -p /etc/datalake
+echo "MT5_BRIDGE_KEY=${BRIDGE_KEY}" | sudo tee /etc/datalake/mt5-bridge-key > /dev/null
+sudo chmod 600 /etc/datalake/mt5-bridge-key
+sudo chown root:root /etc/datalake/mt5-bridge-key
+
+# Client side — same value in the API's .env
+sed -i "s|^MT5_BRIDGE_KEY=.*|MT5_BRIDGE_KEY=${BRIDGE_KEY}|" /opt/datalake-api/.env
+grep ^MT5_BRIDGE_KEY= /opt/datalake-api/.env  # sanity-check
+```
+
+### Install the unit
+
 Edit `deploy/mt5-bridge.service` if your wine-python path differs (check with
 `ls /home/datalake/.wine-mt5/drive_c/`). Then:
 
@@ -260,11 +282,20 @@ sudo cp deploy/mt5-bridge.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now mt5-bridge
 sudo systemctl status mt5-bridge   # should be active (running)
-journalctl -u mt5-bridge -n 50     # confirm initialization log
+journalctl -u mt5-bridge -n 50     # confirm initialization log shows "auth: enabled"
 ```
 
-Confirm the API container will be able to reach it: from the host,
-`curl http://127.0.0.1:18812/ping` must succeed.
+Confirm the API container will be able to reach it. From the host, an
+unauthenticated ping should now return 401:
+
+```bash
+curl -i http://127.0.0.1:18812/ping                              # expect 401
+curl -i -H "X-Bridge-Key: ${BRIDGE_KEY}" http://127.0.0.1:18812/ping  # expect 200
+```
+
+If you rotate the key later, update both `/etc/datalake/mt5-bridge-key` and
+`.env`, then `sudo systemctl restart mt5-bridge` and recreate the API container
+(`docker compose -f docker-compose.prod.yml up -d api`).
 
 ## 9. Boot the stack
 
@@ -370,6 +401,39 @@ journalctl -u datalake-backup.service -n 50
 
 Rotate the key: edit `/etc/datalake/api-key` and `sudo systemctl daemon-reload`.
 No service restart needed — `EnvironmentFile` is read on each activation.
+
+## 11b. fail2ban on Caddy 401/403s
+
+Stock fail2ban out of §2 only covers SSH. Caddy now writes its JSON access log
+to `/var/log/caddy/access.log` (bind-mounted on the host), which lets us jail
+IPs that spam bad `X-API-Key` attempts.
+
+```bash
+# Log dir must exist before Caddy starts; if you set this up after deploy, the
+# bind-mount will auto-create it, but permissions may be off — fix here.
+sudo mkdir -p /var/log/caddy
+sudo chown root:root /var/log/caddy
+sudo chmod 755 /var/log/caddy
+
+# Install filter + jail shipped in deploy/
+sudo cp /opt/datalake-api/deploy/fail2ban-datalake-auth.conf /etc/fail2ban/filter.d/datalake-auth.conf
+sudo cp /opt/datalake-api/deploy/fail2ban-datalake-auth.jail /etc/fail2ban/jail.d/datalake-auth.conf
+
+# Recreate Caddy so the log file appears with the correct mount
+docker compose -f docker-compose.prod.yml up -d caddy
+
+sudo systemctl restart fail2ban
+sudo fail2ban-client status datalake-auth   # should list the jail
+```
+
+Verify the filter matches real entries (optional):
+
+```bash
+sudo fail2ban-regex /var/log/caddy/access.log /etc/fail2ban/filter.d/datalake-auth.conf
+```
+
+Thresholds: **10 x 401/403 within 10 min → 1-hour UFW ban**. Tune in
+`/etc/fail2ban/jail.d/datalake-auth.conf` if legitimate clients trip it.
 
 ## 12. Backups — retrieving artifacts
 

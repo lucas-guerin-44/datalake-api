@@ -1,0 +1,19 @@
+# /etc/fail2ban/jail.d/datalake-auth.conf
+#
+# Ban IPs that accumulate 10 x 401/403 responses from Caddy within 10 minutes.
+# /healthcheck is unauthenticated so it won't trigger. Authenticated clients
+# sending a bad X-API-Key more than a handful of times look nothing like real
+# traffic.
+#
+# Copy this file to /etc/fail2ban/jail.d/datalake-auth.conf on the VPS.
+
+[datalake-auth]
+enabled   = true
+filter    = datalake-auth
+logpath   = /var/log/caddy/access.log
+backend   = auto
+maxretry  = 10
+findtime  = 600
+bantime   = 3600
+# Uses UFW on this box, not iptables directly
+banaction = ufw

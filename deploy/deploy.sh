@@ -56,4 +56,22 @@ if ! curl -fsS http://127.0.0.1/healthcheck > /dev/null; then
     exit 1
 fi
 
+# Keep the current image + the N most-recent previous tags, delete older ones.
+# Also prune dangling layers (rebuilds leave a lot of <none>-tagged intermediates).
+KEEP_IMAGES="${KEEP_IMAGES:-3}"
+echo ">> cleanup: keeping most-recent ${KEEP_IMAGES} datalake-api:<sha> tags"
+
+# Sort tagged datalake-api:* images by CreatedAt desc, skip the 'latest' pointer
+# and the currently-running tag, then remove the tail.
+docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' datalake-api \
+    | grep -v ':latest ' \
+    | grep -v "^${IMAGE} " \
+    | sort -k2 -r \
+    | awk -v keep="${KEEP_IMAGES}" 'NR > keep {print $1}' \
+    | xargs -r docker rmi 2>/dev/null || true
+
+# Dangling (<none>) layers from rebuilds. Safe: they have no tag and no
+# container refers to them.
+docker image prune -f >/dev/null
+
 echo ">> deployed ${IMAGE}"

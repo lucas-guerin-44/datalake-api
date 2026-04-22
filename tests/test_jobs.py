@@ -3,7 +3,6 @@ Tests for the in-memory background job registry.
 """
 import os
 
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 
 import sys
 from pathlib import Path

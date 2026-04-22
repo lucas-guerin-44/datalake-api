@@ -3,7 +3,6 @@ Tests for WebSocket streaming endpoints (ticks and bars).
 """
 import os
 
-os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
 
@@ -205,13 +204,15 @@ class TestWebSocketAuth:
         assert exc.value.code == 4401
 
     def test_rejects_invalid_token_when_public_reads_disabled(self, client, seed_ticks, monkeypatch):
+        """A bogus header credential is treated the same as anonymous — closed with 4401."""
         from starlette.websockets import WebSocketDisconnect
         from src.routes import stream as stream_module
         monkeypatch.setattr(stream_module, "ALLOW_PUBLIC_READS", False)
 
         with pytest.raises(WebSocketDisconnect) as exc:
             with client.websocket_connect(
-                "/ws/ticks?instrument=XAUUSD&speed=1000&token=not-a-real-jwt"
+                "/ws/ticks?instrument=XAUUSD&speed=1000",
+                headers={"Authorization": "Bearer not-a-real-jwt"},
             ) as ws:
                 ws.receive_text()
                 ws.receive_text()

@@ -139,24 +139,24 @@ async def stream_ticks(
     end: Optional[str] = Query(None),
     speed: float = Query(1.0, gt=0),
     max_delay: float = Query(10.0, ge=0),
-    token: Optional[str] = Query(None),
-    api_key: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     Stream historical tick data at real-time speed (or multiplied).
+
+    Auth: send credentials via headers only — `Authorization: Bearer <jwt>` or
+    `X-API-Key: dk_...`. Query-string auth is not supported (leaks into logs).
 
     Query params:
         instrument — required, e.g. XAUUSD
         start / end — optional ISO-8601 timestamp bounds
         speed — playback multiplier (1.0 = real-time, 10.0 = 10x fast)
         max_delay — upper bound in seconds on sleep between messages (0 = burst)
-        token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
     try:
         async with _ws_slot(ws):
-            if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+            if not await ws_require_auth(ws, db, "read", ALLOW_PUBLIC_READS):
                 return
             instrument = validate_instrument(instrument)
 
@@ -200,12 +200,13 @@ async def stream_bars(
     end: Optional[str] = Query(None),
     speed: float = Query(1.0, gt=0),
     max_delay: float = Query(10.0, ge=0),
-    token: Optional[str] = Query(None),
-    api_key: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     Stream historical OHLC bars at real-time speed (or multiplied).
+
+    Auth: send credentials via headers only — `Authorization: Bearer <jwt>` or
+    `X-API-Key: dk_...`. Query-string auth is not supported (leaks into logs).
 
     Query params:
         instrument — required, e.g. XAUUSD
@@ -213,12 +214,11 @@ async def stream_bars(
         start / end — optional ISO-8601 timestamp bounds
         speed — playback multiplier (1.0 = real-time, 60.0 = 1 bar/sec for M1)
         max_delay — upper bound in seconds on sleep between messages (0 = burst)
-        token / api_key — optional auth credentials (headers preferred)
     """
     await ws.accept()
     try:
         async with _ws_slot(ws):
-            if not await ws_require_auth(ws, db, token, api_key, "read", ALLOW_PUBLIC_READS):
+            if not await ws_require_auth(ws, db, "read", ALLOW_PUBLIC_READS):
                 return
             instrument = validate_instrument(instrument)
             timeframe = validate_timeframe(timeframe)

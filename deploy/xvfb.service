@@ -1,0 +1,15 @@
+[Unit]
+Description=Virtual X framebuffer on display :99 (for headless MT5)
+After=network-online.target
+Before=mt5-terminal.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

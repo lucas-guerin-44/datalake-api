@@ -5,6 +5,7 @@ import os
 
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
 
 import json
 import sys
@@ -185,3 +186,39 @@ class TestBarStreaming:
         with client.websocket_connect("/ws/bars?instrument=EURUSD&timeframe=H1&speed=1000") as ws:
             data = json.loads(ws.receive_text())
             assert data["done"] is True
+
+
+class TestWebSocketAuth:
+    """Verify the /ws/* gate honors ALLOW_PUBLIC_READS and rejects bad credentials."""
+
+    def test_rejects_anonymous_when_public_reads_disabled(self, client, seed_ticks, monkeypatch):
+        """Flipping ALLOW_PUBLIC_READS off closes anonymous ws connections with 4401."""
+        from starlette.websockets import WebSocketDisconnect
+        from src.routes import stream as stream_module
+        monkeypatch.setattr(stream_module, "ALLOW_PUBLIC_READS", False)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws/ticks?instrument=XAUUSD&speed=1000") as ws:
+                # Server sends the {"error": ...} frame before closing; consume it.
+                ws.receive_text()
+                ws.receive_text()  # this raises WebSocketDisconnect
+        assert exc.value.code == 4401
+
+    def test_rejects_invalid_token_when_public_reads_disabled(self, client, seed_ticks, monkeypatch):
+        from starlette.websockets import WebSocketDisconnect
+        from src.routes import stream as stream_module
+        monkeypatch.setattr(stream_module, "ALLOW_PUBLIC_READS", False)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                "/ws/ticks?instrument=XAUUSD&speed=1000&token=not-a-real-jwt"
+            ) as ws:
+                ws.receive_text()
+                ws.receive_text()
+        assert exc.value.code == 4401
+
+    def test_public_reads_allows_anonymous(self, client, seed_ticks):
+        """Default test env has ALLOW_PUBLIC_READS=true; anonymous streaming works."""
+        with client.websocket_connect("/ws/ticks?instrument=XAUUSD&speed=1000") as ws:
+            data = json.loads(ws.receive_text())
+            assert "price" in data

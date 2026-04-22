@@ -1,11 +1,12 @@
 """Authentication and authorization utilities for JWT-based auth and API keys."""
+import json
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status, Header, Request
+from fastapi import Depends, HTTPException, status, Header, Request, WebSocket
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -226,3 +227,75 @@ class ScopedAuth:
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+# --- WebSocket authentication ---
+
+def _extract_bearer(header_value: Optional[str]) -> Optional[str]:
+    if header_value and header_value.lower().startswith("bearer "):
+        return header_value[7:].strip()
+    return None
+
+
+async def ws_require_auth(
+    ws: WebSocket,
+    db: Session,
+    token: Optional[str],
+    api_key: Optional[str],
+    required_scope: str,
+    allow_public: bool,
+) -> bool:
+    """
+    Validate an already-accepted WebSocket connection.
+
+    Credentials are read from query params (`token=`, `api_key=`) first, with a
+    fallback to headers (`Authorization: Bearer`, `X-API-Key`). Query params are
+    the common fallback for browser `new WebSocket()` which can't set headers;
+    be aware they appear in access logs unless the proxy filters them.
+
+    Returns True when the caller should proceed with streaming:
+      - authenticated JWT or API key (scope satisfied), or
+      - no credentials supplied AND allow_public is True.
+
+    Returns False after closing the socket with 4401 / 4403 when auth is
+    required and missing/invalid. Callers should `return` immediately.
+    """
+    token = token or _extract_bearer(ws.headers.get("authorization"))
+    api_key = api_key or ws.headers.get("x-api-key")
+
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            username: str = payload.get("sub")
+            if username:
+                user = get_user_by_username(db, username=username)
+                if user and user.is_active:
+                    return True
+        except JWTError:
+            pass
+
+    if api_key:
+        result = authenticate_api_key(db, api_key)
+        if result:
+            _, key_record = result
+            if check_scope(required_scope, key_record.scopes):
+                return True
+            await _ws_close_with_reason(ws, 4403, f"insufficient scope: {required_scope} required")
+            return False
+
+    if allow_public and not token and not api_key:
+        return True
+
+    await _ws_close_with_reason(ws, 4401, "unauthorized")
+    return False
+
+
+async def _ws_close_with_reason(ws: WebSocket, code: int, message: str) -> None:
+    try:
+        await ws.send_text(json.dumps({"error": message}))
+    except Exception:
+        pass
+    try:
+        await ws.close(code=code)
+    except Exception:
+        pass

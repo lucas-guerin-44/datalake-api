@@ -5,10 +5,13 @@ Uses in-memory SQLite to avoid requiring PostgreSQL for unit tests.
 """
 import os
 
-# Set required environment variables before importing src modules
+# Set required environment variables before importing src modules.
+# ScopedAuth / ws_require_auth capture ALLOW_PUBLIC_READS at route-import time, so it
+# must be set before any src module loads — not inside a fixture.
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("ALLOW_REGISTRATION", "true")
+os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
 
 import sys
 from datetime import datetime, timedelta

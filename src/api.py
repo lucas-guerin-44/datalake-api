@@ -7,8 +7,10 @@ from src.middleware.logging_config import setup_logging, get_logger
 from src.middleware.middleware import RequestLoggingMiddleware
 from src.middleware.ratelimit import limiter
 from src.core.database import init_db
-from src.core.datalake import init_duckdb
+from src.core.datalake import init_duckdb, _write_tx_lock
 from src.config import validate_secrets
+
+SHUTDOWN_WRITE_WAIT_SECONDS = 25.0
 from src.routes import (
     catalog_router,
     instruments_router,
@@ -49,3 +51,15 @@ def startup_event():
     init_db()
     init_duckdb()
     logger.info("Database initialized successfully")
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Block until in-flight DuckDB writes finish so SIGTERM can't interrupt a transaction."""
+    logger.info("Shutdown: waiting for in-flight writes", extra={"timeout_s": SHUTDOWN_WRITE_WAIT_SECONDS})
+    acquired = _write_tx_lock.acquire(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
+    if acquired:
+        _write_tx_lock.release()
+        logger.info("Shutdown: no in-flight writes, exiting cleanly")
+    else:
+        logger.warning("Shutdown: timed out waiting for in-flight write; exiting anyway")

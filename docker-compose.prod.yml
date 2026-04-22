@@ -20,6 +20,11 @@ services:
           memory: 1g
           cpus: "1.0"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     networks:
       - datalake-network
 
@@ -54,6 +59,13 @@ services:
           memory: 4g
           cpus: "2.0"
     restart: unless-stopped
+    # Let the FastAPI shutdown hook drain in-flight DuckDB writes before Docker SIGKILLs.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     networks:
       - datalake-network
 
@@ -70,6 +82,11 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     networks:
       - datalake-network
 

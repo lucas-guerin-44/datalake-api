@@ -1,0 +1,31 @@
+---
+const items = [
+  { name: "FastAPI", role: "REST + WebSocket API" },
+  { name: "DuckDB", role: "OHLC + tick storage" },
+  { name: "PostgreSQL", role: "users + API keys" },
+  { name: "Caddy", role: "TLS reverse proxy" },
+  { name: "Docker Compose", role: "container orchestration" },
+  { name: "Wine", role: "runs MT5 on Linux" },
+  { name: "systemd + fail2ban", role: "ops on the host" },
+  { name: "Hetzner", role: "VPS" },
+];
+---
+
+<section id="stack" class="border-t border-ink-800/80">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-24">
+    <div class="mb-10 max-w-2xl">
+      <p class="text-xs uppercase tracking-wider text-accent">Stack</p>
+      <h2 class="mt-2 text-3xl font-semibold tracking-tight text-ink-50 sm:text-4xl">
+        What it's built with.
+      </h2>
+    </div>
+    <ul class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-800 bg-ink-800 sm:grid-cols-4">
+      {items.map((it) => (
+        <li class="bg-ink-900 p-5">
+          <div class="font-medium text-ink-100">{it.name}</div>
+          <div class="mt-1 text-xs text-ink-500">{it.role}</div>
+        </li>
+      ))}
+    </ul>
+  </div>
+</section>

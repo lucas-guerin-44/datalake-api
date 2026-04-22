@@ -1,0 +1,34 @@
+---
+import Base from "../layouts/Base.astro";
+import Hero from "../components/Hero.astro";
+import StatsStrip from "../components/StatsStrip.astro";
+import Architecture from "../components/Architecture.astro";
+import Stack from "../components/Stack.astro";
+import SampleResponse from "../components/SampleResponse.astro";
+
+const year = new Date().getFullYear();
+---
+
+<Base>
+  <main>
+    <Hero />
+    <StatsStrip />
+    <Architecture />
+    <Stack />
+    <SampleResponse />
+  </main>
+
+  <footer class="border-t border-ink-800/80">
+    <div class="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-10 text-sm text-ink-500 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        Built &amp; hosted by
+        <a href="https://lucasguerin.fr" class="text-ink-300 hover:text-ink-100 underline underline-offset-2 decoration-ink-700">Lucas Guerin</a>.
+        Since 2025.
+      </div>
+      <div class="flex items-center gap-6">
+        <a href="https://github.com/lucasguerin/datalake-api" target="_blank" rel="noopener" class="hover:text-ink-200 transition-colors">GitHub</a>
+        <a href="mailto:guerin.lucas44@gmail.com" class="hover:text-ink-200 transition-colors">guerin.lucas44@gmail.com</a>
+      </div>
+    </div>
+  </footer>
+</Base>

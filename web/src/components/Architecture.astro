@@ -1,0 +1,64 @@
+---
+const steps = [
+  {
+    title: "MetaTrader 5",
+    sub: "broker terminal",
+    detail: "Source of quotes and historical data. Runs inside Wine on the same VPS.",
+  },
+  {
+    title: "MT5 bridge",
+    sub: "systemd service",
+    detail: "Small HTTP server that forwards requests from the API to MT5's Python API inside the Wine prefix.",
+  },
+  {
+    title: "FastAPI",
+    sub: "ingest · query · WebSocket",
+    detail: "Handles ingestion, auto-derivation from M1 to D1, cursor-paginated queries, and historical replay.",
+  },
+  {
+    title: "DuckDB + Postgres",
+    sub: "market data · auth",
+    detail: "DuckDB holds OHLC bars and ticks in an embedded columnar file. Postgres holds users and API keys.",
+  },
+  {
+    title: "Caddy",
+    sub: "TLS · reverse proxy",
+    detail: "Terminates TLS, proxies /api/* to FastAPI and / to this static site, and feeds the access log to fail2ban.",
+  },
+];
+---
+
+<section id="architecture" class="relative">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+    <div class="mb-10 max-w-2xl">
+      <p class="text-xs uppercase tracking-wider text-accent">Architecture</p>
+      <h2 class="mt-2 text-3xl font-semibold tracking-tight text-ink-50 sm:text-4xl">
+        How the data flows.
+      </h2>
+      <p class="mt-4 text-ink-400">
+        The whole thing runs on one Hetzner VPS.
+      </p>
+    </div>
+
+    <ol class="relative grid gap-4 lg:grid-cols-5">
+      {steps.map((s, i) => (
+        <li class="group relative flex flex-col rounded-lg border border-ink-800 bg-ink-900/50 p-5 transition-colors hover:border-ink-700">
+          <div class="mb-3 flex items-center gap-2">
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-md bg-ink-800 font-mono text-[11px] text-ink-300 group-hover:bg-accent/20 group-hover:text-accent transition-colors">
+              {String(i + 1).padStart(2, "0")}
+            </span>
+            {i < steps.length - 1 && (
+              <span class="flex-1 border-t border-dashed border-ink-700 lg:hidden" aria-hidden="true"></span>
+            )}
+          </div>
+          <h3 class="font-medium text-ink-100">{s.title}</h3>
+          <p class="mt-0.5 text-xs text-ink-500">{s.sub}</p>
+          <p class="mt-3 text-sm leading-relaxed text-ink-400">{s.detail}</p>
+          {i < steps.length - 1 && (
+            <span class="pointer-events-none absolute -right-3 top-1/2 hidden h-px w-6 -translate-y-1/2 bg-ink-700 lg:block" aria-hidden="true"></span>
+          )}
+        </li>
+      ))}
+    </ol>
+  </div>
+</section>

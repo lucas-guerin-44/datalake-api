@@ -309,11 +309,16 @@ Expected output ends with `>> deployed datalake-api:<sha>`.
 Verify:
 
 ```bash
-curl https://<DOMAIN>/healthcheck          # or http://<VPS_IP>/healthcheck
-curl https://<DOMAIN>/healthcheck/ready    # must return 200 with both checks "ok"
+# Landing page (static site container)
+curl -I https://<DOMAIN>/                      # expect 200, text/html
+
+# API (FastAPI container) — note the /api/ prefix introduced by the Caddy split
+curl https://<DOMAIN>/api/healthcheck          # or http://<VPS_IP>/api/healthcheck
+curl https://<DOMAIN>/api/healthcheck/ready    # must return 200 with both checks "ok"
 ```
 
 If readiness returns 503, check `docker compose logs api postgres`.
+If the landing fails but the API is fine, check `docker compose logs web caddy`.
 
 ## 10. Create your user + mint a long-lived API key
 
@@ -352,7 +357,7 @@ once, never again. From your laptop you now call the API with
 
 ### Liveness monitoring — cronjob.org
 
-Point a job at `GET https://<DOMAIN>/healthcheck/ready`, every 5 min, email on
+Point a job at `GET https://<DOMAIN>/api/healthcheck/ready`, every 5 min, email on
 non-2xx. This is the one that wakes you up at night; systemd timers can't page
 you if the whole VPS is down.
 
@@ -360,9 +365,9 @@ you if the whole VPS is down.
 
 Two timer pairs ship under `deploy/`:
 
-- `datalake-refresh.{service,timer}` — `POST /ingest/refresh` with `{"days": 7}`
+- `datalake-refresh.{service,timer}` — `POST /api/ingest/refresh` with `{"days": 7}`
   every Sunday 03:00 UTC. Depends on `mt5-bridge.service`.
-- `datalake-backup.{service,timer}` — `POST /backup/run?keep=8` every Sunday
+- `datalake-backup.{service,timer}` — `POST /api/backup/run?keep=8` every Sunday
   05:00 UTC. Runs after refresh so the weekend's fresh data is exported.
 
 Install once:
@@ -447,7 +452,7 @@ rsync -avz --progress datalake@<VPS_IP>:/opt/datalake-api/backups/ ./vps-backups
 Latest manifest for verification:
 
 ```bash
-curl -H "X-API-Key: $KEY" https://<DOMAIN>/backup/latest
+curl -H "X-API-Key: $KEY" https://<DOMAIN>/api/backup/latest
 ```
 
 ## 13. Updates

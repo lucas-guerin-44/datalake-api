@@ -69,6 +69,22 @@ services:
     networks:
       - datalake-network
 
+  web:
+    build:
+      context: .
+      dockerfile: web.Dockerfile
+    image: datalake-web:latest
+    container_name: datalake-web
+    # No host port mapping — only the edge Caddy reaches it.
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - datalake-network
+
   caddy:
     image: caddy:2-alpine
     container_name: datalake-caddy
@@ -83,6 +99,7 @@ services:
       - /var/log/caddy:/var/log/caddy
     depends_on:
       - api
+      - web
     restart: unless-stopped
     logging:
       driver: json-file

@@ -23,7 +23,15 @@ class TestValidateInstrument:
         "EURUSD", "GBPUSD", "XAU_USD", "S&P-500", "BTC_USDT", "EUR123", "abc", "A",
     ])
     def test_valid_instruments(self, instrument):
-        assert validate_instrument(instrument) == instrument
+        assert validate_instrument(instrument) == instrument.upper()
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("eurusd", "EURUSD"),
+        ("XAUUSd", "XAUUSD"),
+        ("btc_usdt", "BTC_USDT"),
+    ])
+    def test_instrument_normalized_to_upper(self, raw, expected):
+        assert validate_instrument(raw) == expected
 
     def test_empty_instrument_raises(self):
         with pytest.raises(HTTPException) as exc_info:

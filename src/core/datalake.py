@@ -621,6 +621,73 @@ def get_data_range(instrument: str, timeframe: str) -> Optional[dict]:
     return None
 
 
+def delete_ohlc_data(
+    instrument: str,
+    timeframe: Optional[str] = None,
+    start=None,
+    end=None,
+) -> int:
+    """
+    Delete rows from ohlc_data matching instrument [+ timeframe] [+ window).
+    Window is half-open [start, end). Returns rows deleted.
+    """
+    instrument = validate_instrument(instrument)
+    if timeframe is not None:
+        timeframe = validate_timeframe(timeframe)
+
+    clauses = ["instrument = ?"]
+    params: list = [instrument]
+    if timeframe is not None:
+        clauses.append("timeframe = ?")
+        params.append(timeframe)
+    if start is not None:
+        clauses.append("timestamp >= ?")
+        params.append(pd.Timestamp(start).tz_localize(None) if pd.Timestamp(start).tz is None else pd.Timestamp(start).tz_convert("UTC").tz_localize(None))
+    if end is not None:
+        clauses.append("timestamp < ?")
+        params.append(pd.Timestamp(end).tz_localize(None) if pd.Timestamp(end).tz is None else pd.Timestamp(end).tz_convert("UTC").tz_localize(None))
+    where = " AND ".join(clauses)
+
+    with _write_tx_lock:
+        con = _get_shared_connection()
+        before = con.execute(f"SELECT COUNT(*) FROM ohlc_data WHERE {where}", params).fetchone()[0]
+        con.execute(f"DELETE FROM ohlc_data WHERE {where}", params)
+
+    logger.info("Deleted OHLC rows", extra={
+        "instrument": instrument, "timeframe": timeframe,
+        "start": str(start) if start else None, "end": str(end) if end else None,
+        "rows": before,
+    })
+    return before
+
+
+def delete_tick_data(instrument: str, start=None, end=None) -> int:
+    """Delete rows from tick_data matching instrument [+ window). Returns rows deleted."""
+    instrument = validate_instrument(instrument)
+
+    clauses = ["instrument = ?"]
+    params: list = [instrument]
+    if start is not None:
+        clauses.append("timestamp >= ?")
+        params.append(pd.Timestamp(start).tz_localize(None) if pd.Timestamp(start).tz is None else pd.Timestamp(start).tz_convert("UTC").tz_localize(None))
+    if end is not None:
+        clauses.append("timestamp < ?")
+        params.append(pd.Timestamp(end).tz_localize(None) if pd.Timestamp(end).tz is None else pd.Timestamp(end).tz_convert("UTC").tz_localize(None))
+    where = " AND ".join(clauses)
+
+    with _write_tx_lock:
+        con = _get_shared_connection()
+        before = con.execute(f"SELECT COUNT(*) FROM tick_data WHERE {where}", params).fetchone()[0]
+        con.execute(f"DELETE FROM tick_data WHERE {where}", params)
+
+    logger.info("Deleted tick rows", extra={
+        "instrument": instrument,
+        "start": str(start) if start else None, "end": str(end) if end else None,
+        "rows": before,
+    })
+    return before
+
+
 def get_database_stats() -> dict:
     """Get overall database statistics."""
     with get_db_connection() as con:

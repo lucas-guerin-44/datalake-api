@@ -37,7 +37,7 @@ def validate_instrument(instrument: str) -> str:
             detail="Invalid instrument name: must contain only alphanumeric characters, underscores, hyphens, and ampersands"
         )
 
-    return instrument
+    return instrument.upper()
 
 
 def validate_timeframe(timeframe: str) -> str:

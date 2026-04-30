@@ -30,7 +30,7 @@ from src.routes import (
 setup_logging()
 logger = get_logger(__name__)
 
-app = FastAPI(title="Datalake API")
+app = FastAPI(title="Datalake API", root_path="/api")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

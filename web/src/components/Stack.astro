@@ -3,14 +3,12 @@
 // (center of the card, not cursor-tracking) that fades in on hover, with a
 // tiled SVG noise overlay to stop it feeling plasticky.
 const items = [
-  { name: "FastAPI",             role: "REST + WebSocket API",    color: "#009688" },
-  { name: "DuckDB",              role: "OHLC + tick storage",     color: "#F4C430" },
-  { name: "PostgreSQL",          role: "users + API keys",        color: "#336791" },
-  { name: "Caddy",               role: "TLS reverse proxy",       color: "#30D094" },
-  { name: "Docker Compose",      role: "container orchestration", color: "#2496ED" },
-  { name: "Wine",                role: "runs MT5 on Linux",       color: "#7B1F1F" },
-  { name: "systemd + fail2ban",  role: "ops on the host",         color: "#E3542D" },
-  { name: "Hetzner",             role: "VPS",                     color: "#D50C2D" },
+  { name: "FastAPI",        role: "REST + WebSocket API",    color: "#009688" },
+  { name: "DuckDB",         role: "OHLC + tick storage",     color: "#F4C430" },
+  { name: "PostgreSQL",     role: "users + API keys",        color: "#336791" },
+  { name: "Caddy",          role: "TLS reverse proxy",       color: "#30D094" },
+  { name: "Docker Compose", role: "container orchestration", color: "#2496ED" },
+  { name: "Hetzner",        role: "VPS",                     color: "#D50C2D" },
 ];
 ---
 
@@ -22,7 +20,7 @@ const items = [
         What it's built with.
       </h2>
     </div>
-    <ul class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-800 bg-ink-800 sm:grid-cols-4">
+    <ul class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-800 bg-ink-800 sm:grid-cols-3">
       {items.map((it) => (
         <li class="stack-card relative overflow-hidden bg-ink-900 p-5" style={`--aura: ${it.color}`}>
           <div class="relative z-10">

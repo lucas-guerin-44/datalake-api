@@ -1,16 +1,6 @@
 ---
 const steps = [
   {
-    title: "MetaTrader 5",
-    sub: "broker terminal",
-    detail: "Source of quotes and historical data. Runs inside Wine on the same VPS.",
-  },
-  {
-    title: "MT5 bridge",
-    sub: "systemd service",
-    detail: "Small HTTP server that forwards requests from the API to MT5's Python API inside the Wine prefix.",
-  },
-  {
     title: "FastAPI",
     sub: "ingest · query · WebSocket",
     detail: "Handles ingestion, auto-derivation from M1 to D1, cursor-paginated queries, and historical replay.",
@@ -23,7 +13,7 @@ const steps = [
   {
     title: "Caddy",
     sub: "TLS · reverse proxy",
-    detail: "Terminates TLS, proxies /api/* to FastAPI and / to this static site, and feeds the access log to fail2ban.",
+    detail: "Terminates TLS, proxies /api/* to FastAPI and / to this static site.",
   },
 ];
 ---
@@ -33,14 +23,14 @@ const steps = [
     <div class="mb-10 max-w-2xl">
       <p class="text-xs uppercase tracking-wider text-accent">Architecture</p>
       <h2 class="mt-2 text-3xl font-semibold tracking-tight text-ink-50 sm:text-4xl">
-        How the data flows.
+        Receive. Store. Serve.
       </h2>
       <p class="mt-4 text-ink-400">
-        The whole thing runs on one Hetzner VPS.
+        Three components, clean boundaries, one VPS.
       </p>
     </div>
 
-    <ol class="relative grid gap-4 lg:grid-cols-5">
+    <ol class="relative grid gap-4 lg:grid-cols-3">
       {steps.map((s, i) => (
         <li class="group relative flex flex-col rounded-lg border border-ink-800 bg-ink-900/50 p-5 transition-colors hover:border-ink-700">
           <div class="mb-3 flex items-center gap-2">

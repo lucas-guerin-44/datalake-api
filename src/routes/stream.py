@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from src.auth.auth import ws_require_auth, _ws_close_with_reason
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import get_db
-from src.core.datalake import get_db_connection
+from src.core.datalake import read_connection
 from src.services.validators import validate_instrument, validate_timeframe
 from src.middleware.logging_config import get_logger
 
@@ -104,7 +104,7 @@ async def _stream_rows(
         LIMIT {PAGE_SIZE}
         """
 
-        with get_db_connection() as con:
+        with read_connection() as con:
             rows = con.execute(sql, page_params).fetchall()
 
         if not rows:

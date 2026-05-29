@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
 from src.core.pagination import encode_cursor, decode_cursor
-from src.core.datalake import get_db_connection
+from src.core.datalake import read_connection
+from src.core.concurrency import query_slot
 from src.services.validators import validate_instrument, validate_timeframe
 from src.auth.auth import ScopedAuth
 
@@ -26,6 +27,7 @@ def query_api(
     limit: int = Query(20, ge=1, le=10000, description="Page size (1-10000)"),
     cursor: Optional[str] = Query(None, description="Pagination cursor from previous response"),
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+    _slot: None = Depends(query_slot),
 ):
     """Query OHLC data from DuckDB with cursor-based pagination."""
     if instrument:
@@ -66,7 +68,7 @@ def query_api(
     LIMIT {fetch_limit}
     """
 
-    with get_db_connection() as con:
+    with read_connection() as con:
         df = con.execute(sql, params).fetchdf()
 
     has_more = len(df) > limit
@@ -97,6 +99,7 @@ async def download_data(
     start: Optional[str] = None,
     end: Optional[str] = None,
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+    _slot: None = Depends(query_slot),
 ):
     """Download OHLC data as a streaming CSV file."""
     instrument = validate_instrument(instrument)
@@ -119,7 +122,7 @@ async def download_data(
     """
 
     async def csv_generator():
-        with get_db_connection() as con:
+        with read_connection() as con:
             db_cursor = con.execute(sql, params)
             header = [desc[0] for desc in db_cursor.description]
 
@@ -153,6 +156,7 @@ def query_ticks_api(
     limit: int = Query(10000, ge=1, le=100000, description="Page size (1-100000)"),
     cursor: Optional[str] = Query(None, description="Pagination cursor from previous response"),
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+    _slot: None = Depends(query_slot),
 ):
     """Query tick data from DuckDB with cursor-based pagination."""
     instrument = validate_instrument(instrument)
@@ -183,7 +187,7 @@ def query_ticks_api(
     LIMIT {fetch_limit}
     """
 
-    with get_db_connection() as con:
+    with read_connection() as con:
         df = con.execute(sql, params).fetchdf()
 
     has_more = len(df) > limit
@@ -213,6 +217,7 @@ async def download_ticks(
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
+    _slot: None = Depends(query_slot),
 ):
     """Download tick data as a streaming CSV file."""
     instrument = validate_instrument(instrument)
@@ -234,7 +239,7 @@ async def download_ticks(
     """
 
     async def csv_generator():
-        with get_db_connection() as con:
+        with read_connection() as con:
             db_cursor = con.execute(sql, params)
             header = [desc[0] for desc in db_cursor.description]
 

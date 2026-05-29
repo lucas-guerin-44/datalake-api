@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
+from src.core import cache
 from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps, shift_timestamps_to_utc
 from src.services.validators import validate_instrument, validate_timeframe
 from fastapi import Query
@@ -18,6 +19,39 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _build_catalog() -> dict:
+    """Assemble the full catalog payload. Heavy — iterates every instrument×timeframe."""
+    stats = get_database_stats()
+    tick_stats = get_tick_database_stats()
+
+    coverage = []
+    for instrument in list_instruments():
+        for timeframe in list_timeframes(instrument):
+            data_range = get_data_range(instrument, timeframe)
+            if data_range:
+                coverage.append({
+                    "instrument": instrument,
+                    "timeframe": timeframe,
+                    "min_date": str(data_range["min_date"]) if data_range["min_date"] else None,
+                    "max_date": str(data_range["max_date"]) if data_range["max_date"] else None,
+                    "record_count": data_range["count"],
+                })
+
+    # Include tick coverage
+    for instrument in list_tick_instruments():
+        tick_cov = get_tick_coverage(instrument)
+        if tick_cov:
+            coverage.append({
+                "instrument": instrument,
+                "timeframe": "TICK",
+                "min_date": str(tick_cov["min_date"]) if tick_cov["min_date"] else None,
+                "max_date": str(tick_cov["max_date"]) if tick_cov["max_date"] else None,
+                "record_count": tick_cov["count"],
+            })
+
+    return {"status": "ok", "database": stats, "tick_database": tick_stats, "coverage": coverage}
+
+
 @router.get("/catalog")
 def get_catalog(
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS))
@@ -25,52 +59,21 @@ def get_catalog(
     """
     Return DuckDB database statistics including available instruments,
     timeframes, and data coverage per instrument/timeframe pair.
+
+    Served from an in-memory cache that self-invalidates on the next ingest/delete,
+    so it never competes with live data queries. On failure the global handler
+    returns a JSON `{error, detail}` envelope — this endpoint never falls through
+    to gateway HTML or a 200 with an error body.
     """
-    try:
-        stats = get_database_stats()
-        tick_stats = get_tick_database_stats()
-
-        coverage = []
-        for instrument in list_instruments():
-            for timeframe in list_timeframes(instrument):
-                data_range = get_data_range(instrument, timeframe)
-                if data_range:
-                    coverage.append({
-                        "instrument": instrument,
-                        "timeframe": timeframe,
-                        "min_date": str(data_range["min_date"]) if data_range["min_date"] else None,
-                        "max_date": str(data_range["max_date"]) if data_range["max_date"] else None,
-                        "record_count": data_range["count"],
-                    })
-
-        # Include tick coverage
-        for instrument in list_tick_instruments():
-            tick_cov = get_tick_coverage(instrument)
-            if tick_cov:
-                coverage.append({
-                    "instrument": instrument,
-                    "timeframe": "TICK",
-                    "min_date": str(tick_cov["min_date"]) if tick_cov["min_date"] else None,
-                    "max_date": str(tick_cov["max_date"]) if tick_cov["max_date"] else None,
-                    "record_count": tick_cov["count"],
-                })
-
-        return {"status": "ok", "database": stats, "tick_database": tick_stats, "coverage": coverage}
-    except Exception as e:
-        logger.error("Failed to retrieve catalog", exc_info=True)
-        return {"status": "error", "message": str(e)}
+    return cache.get_or_compute("catalog", _build_catalog)
 
 
 @router.get("/catalog/stats")
 def get_stats(
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS))
 ):
-    """Return quick database statistics."""
-    try:
-        return get_database_stats()
-    except Exception as e:
-        logger.error("Failed to retrieve stats", exc_info=True)
-        return {"status": "error", "message": str(e)}
+    """Return quick database statistics (cached, self-invalidating on write)."""
+    return cache.get_or_compute("catalog_stats", get_database_stats)
 
 
 def _run_export_job(job_id: str, output_dir: Optional[str]):

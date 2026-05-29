@@ -22,6 +22,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     import MetaTrader5 as mt5
@@ -34,6 +35,20 @@ except ImportError:
 # Empty = auth disabled (dev only). On the VPS this is set via systemd
 # EnvironmentFile so it matches MT5_BRIDGE_KEY on the API container side.
 BRIDGE_KEY = os.getenv("MT5_BRIDGE_KEY", "")
+
+# MT5's MqlRates.time is broker-server-local-time-as-int (NOT real UTC Unix
+# epoch). Localize as the broker tz then convert to real UTC before emitting.
+# Match scripts/mt5_fetch.py in the quant-strategies-research repo. Override
+# the broker tz via env (Eightcap = Europe/Athens / EET/EEST).
+# See quant-strategies-research/docs/RESEARCH_NOTES.md lesson #80 for context.
+BROKER_TZ_NAME = os.getenv("MT5_BROKER_TZ", "Europe/Athens")
+try:
+    BROKER_TZ = ZoneInfo(BROKER_TZ_NAME)
+except ZoneInfoNotFoundError as _e:
+    raise RuntimeError(
+        f"MT5_BROKER_TZ={BROKER_TZ_NAME!r} not resolvable. On Windows/Wine you "
+        f"may need `pip install tzdata`."
+    ) from _e
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -75,7 +90,15 @@ def fetch_bars(symbol: str, timeframe: str, start: datetime, end: datetime) -> l
 
     out = []
     for r in rates:
-        ts = datetime.fromtimestamp(int(r["time"]), tz=timezone.utc)
+        # MT5 `time` is broker-local-time-as-int. utcfromtimestamp gives a
+        # naive datetime whose wall-clock value visually equals the broker
+        # server clock. Attach the broker tz, then convert to real UTC.
+        # fold=0 handles DST fall-back ambiguity by picking the first
+        # (pre-transition) occurrence, which matches MT5's chronological
+        # emission order; spring-forward gaps don't appear in MT5 output.
+        naive = datetime.utcfromtimestamp(int(r["time"]))
+        local = naive.replace(tzinfo=BROKER_TZ)
+        ts = local.astimezone(timezone.utc)
         out.append({
             "timestamp": ts.isoformat(),
             "open": float(r["open"]),

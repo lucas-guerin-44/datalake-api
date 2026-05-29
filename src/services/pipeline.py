@@ -206,16 +206,33 @@ TICK_REQUIRED_COLS = ["timestamp", "price"]
 
 def _read_raw_tick(path: Path) -> pd.DataFrame:
     """Read a raw tick CSV file, auto-detecting MetaTrader and Dukascopy formats."""
+    import os as _os  # local import keeps module imports tight
     with open(path, "rb") as f:
         first_line = f.readline().decode(errors="ignore")
 
     # MetaTrader tick export: <DATE> <TIME> <BID> <ASK> <LAST> <VOLUME>
     if "<DATE>" in first_line and ("<BID>" in first_line or "<LAST>" in first_line):
         df = pd.read_csv(path, sep=r"\s+", engine="python")
+        # MetaTrader <DATE>/<TIME> columns are in BROKER-LOCAL time, not UTC.
+        # Localize as the broker tz (default Europe/Athens for Eightcap-style
+        # GMT+3/+2 servers) then convert to real UTC. Override via env var.
+        # See quant-strategies-research/docs/RESEARCH_NOTES.md lesson #80.
+        _broker_tz = _os.getenv("MT5_BROKER_TZ", "Europe/Athens")
         if "<TIME>" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["<DATE>"] + " " + df["<TIME>"], utc=True)
+            _naive = pd.to_datetime(df["<DATE>"] + " " + df["<TIME>"])
         else:
-            df["timestamp"] = pd.to_datetime(df["<DATE>"], utc=True)
+            _naive = pd.to_datetime(df["<DATE>"])
+        try:
+            _localized = _naive.dt.tz_localize(
+                _broker_tz, ambiguous="infer", nonexistent="shift_forward",
+            )
+        except Exception:
+            _localized = _naive.dt.tz_localize(
+                _broker_tz, ambiguous="NaT", nonexistent="NaT",
+            )
+        df["timestamp"] = _localized.dt.tz_convert("UTC")
+        # Drop DST-ambiguous / non-existent rows (typically 1-2 per year).
+        df = df.dropna(subset=["timestamp"]).reset_index(drop=True)
 
         rename = {}
         if "<BID>" in df.columns:

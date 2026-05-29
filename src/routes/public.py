@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request
 
 from src.config import DUCKDB_PATH
-from src.core.datalake import get_db_connection
+from src.core.datalake import read_connection
 from src.middleware.logging_config import get_logger
 from src.middleware.ratelimit import limiter
 
@@ -33,7 +33,7 @@ _TIMEFRAME_ORDER = {"M1": 0, "M5": 1, "M15": 2, "M30": 3, "H1": 4, "H4": 5, "D1"
 
 
 def _compute_stats() -> dict:
-    with get_db_connection() as con:
+    with read_connection() as con:
         ohlc_rows = con.execute("SELECT COUNT(*) FROM ohlc_data").fetchone()[0]
         tick_rows = con.execute("SELECT COUNT(*) FROM tick_data").fetchone()[0]
         instrument_count = con.execute(

@@ -1,5 +1,6 @@
 """Main FastAPI application - wires up all route modules."""
-from fastapi import FastAPI, Depends, Response
+from fastapi import FastAPI, Depends, Request, Response
+from fastapi.responses import JSONResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi.errors import RateLimitExceeded
@@ -35,6 +36,21 @@ app = FastAPI(title="Datalake API", root_path="/api")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(RequestLoggingMiddleware)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Last-resort handler so an unexpected error returns a JSON `{error, detail}`
+    envelope with a 500, never a bare gateway HTML body. Clients can always parse
+    the response as JSON. HTTPException keeps FastAPI's own handler (correct status
+    + `{detail}`); this only catches what would otherwise be an uncaught 500.
+    """
+    logger.error("Unhandled exception", exc_info=exc, extra={"path": request.url.path})
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_error", "detail": str(exc)},
+    )
 
 # Instrument every route with request counters + latency histograms.
 # /metrics is exposed manually below so we can gate it behind admin scope.

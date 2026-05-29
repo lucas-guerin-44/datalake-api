@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
+from src.core import cache
 from src.core.datalake import (
     list_instruments,
     list_timeframes,
@@ -25,11 +26,12 @@ router = APIRouter()
 def get_instruments(
     current_user: Optional[User] = Depends(ScopedAuth("read", allow_public=ALLOW_PUBLIC_READS)),
 ):
-    """List all instruments that have data in the datalake."""
-    ohlc = set(list_instruments())
-    tick = set(list_tick_instruments())
-    all_instruments = sorted(ohlc | tick)
-    return {"instruments": all_instruments}
+    """List all instruments that have data in the datalake (cached, self-invalidating on write)."""
+    def _build():
+        all_instruments = sorted(set(list_instruments()) | set(list_tick_instruments()))
+        return {"instruments": all_instruments}
+
+    return cache.get_or_compute("instruments", _build)
 
 
 @router.get("/instruments/{symbol}")

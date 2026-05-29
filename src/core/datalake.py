@@ -19,14 +19,15 @@ logger = get_logger(__name__)
 
 DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# Shared connection — DuckDB supports concurrent reads from a single connection.
-# Writes acquire an internal lock automatically.
+# One process-wide DuckDB database instance. Only a single OS process may hold a
+# DuckDB file open read-write, which is why this API runs with a single uvicorn
+# worker — see read_connection() below for how we still get concurrent reads.
 _db_lock = threading.Lock()
 _db_connection: Optional[duckdb.DuckDBPyConnection] = None
 
 
 def _get_shared_connection() -> duckdb.DuckDBPyConnection:
-    """Get or create the shared DuckDB connection."""
+    """Get or create the shared DuckDB connection (the write/transaction connection)."""
     global _db_connection
     if _db_connection is None:
         with _db_lock:
@@ -42,9 +43,67 @@ def _get_shared_connection() -> duckdb.DuckDBPyConnection:
 
 @contextmanager
 def get_db_connection():
-    """Context manager for DuckDB connections. Uses a shared connection."""
+    """
+    Yield the shared DuckDB connection. This is the *write* connection — use it
+    only for writes and for statements that must run inside write_transaction()'s
+    open transaction (the derive_* helpers). Every execute() on this single
+    connection object serializes on its internal lock, so a read here queues
+    behind any in-flight write/scan. For read-only queries use read_connection().
+    """
     con = _get_shared_connection()
     yield con
+
+
+@contextmanager
+def read_connection():
+    """
+    Yield an independent DuckDB cursor for READ-ONLY queries.
+
+    `.cursor()` returns a separate connection sharing the same database instance,
+    so concurrent reads run in parallel (DuckDB serves them from an MVCC snapshot)
+    instead of head-of-line blocking on the single shared connection object. This
+    is what stops a small query — or the readiness probe — from queuing behind a
+    large scan and tripping the gateway into a 502.
+
+    Never write through this: writes must go through write_transaction() so they
+    stay serialized and atomic. A cursor's statements are not part of the shared
+    connection's open transaction.
+    """
+    con = _get_shared_connection().cursor()
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+# Monotonic data-version counter, bumped on every committed write/delete. Read
+# caches (see src/core/cache.py) key on this so /catalog and /instruments serve
+# instantly from memory and self-invalidate the moment data changes.
+_data_version = 0
+_data_version_lock = threading.Lock()
+
+
+def get_data_version() -> int:
+    """Current data-version token. Changes whenever ohlc_data/tick_data is written."""
+    return _data_version
+
+
+def bump_data_version() -> None:
+    """Invalidate version-keyed read caches. Called after any committed write/delete."""
+    global _data_version
+    with _data_version_lock:
+        _data_version += 1
+
+
+def duckdb_ready() -> bool:
+    """
+    Cheap, non-contending readiness signal: True once the database instance is
+    open. Deliberately does NOT run a query — readiness must mean "the process is
+    up and can serve", not "the engine is idle right now", so a heavy in-flight
+    scan can never make this probe (and the cron pointed at it) report a false
+    502/down. See datalake-api-1rh.
+    """
+    return _db_connection is not None
 
 
 # Serializes all write transactions so BEGIN/COMMIT on the shared connection is safe.
@@ -69,6 +128,8 @@ def write_transaction():
         except Exception:
             con.execute("ROLLBACK")
             raise
+        else:
+            bump_data_version()
 
 
 def init_duckdb():
@@ -116,7 +177,7 @@ def init_duckdb():
 
 def list_instruments() -> List[str]:
     """List all unique instruments in the database."""
-    with get_db_connection() as con:
+    with read_connection() as con:
         rows = con.execute("SELECT DISTINCT instrument FROM ohlc_data ORDER BY instrument").fetchall()
         return [r[0] for r in rows]
 
@@ -126,7 +187,7 @@ def list_timeframes(instrument: Optional[str] = None) -> List[str]:
     if instrument:
         instrument = validate_instrument(instrument)
 
-    with get_db_connection() as con:
+    with read_connection() as con:
         if instrument:
             rows = con.execute(
                 "SELECT DISTINCT timeframe FROM ohlc_data WHERE instrument = ? ORDER BY timeframe",
@@ -455,6 +516,7 @@ def shift_timestamps_to_utc(source_timezone: str) -> dict:
                     extra={"error": str(cleanup_err), "elevated_limit": "8GB"},
                 )
 
+    bump_data_version()
     result = {
         "ohlc_rows_before": before_ohlc,
         "ohlc_rows_after": after_ohlc,
@@ -511,7 +573,7 @@ def find_gaps(
         ORDER BY duration_seconds DESC
         LIMIT ?
     """
-    with get_db_connection() as con:
+    with read_connection() as con:
         rows = con.execute(sql, params).fetchall()
 
     result = []
@@ -604,7 +666,7 @@ def get_data_range(instrument: str, timeframe: str) -> Optional[dict]:
     instrument = validate_instrument(instrument)
     timeframe = validate_timeframe(timeframe)
 
-    with get_db_connection() as con:
+    with read_connection() as con:
         result = con.execute("""
             SELECT MIN(timestamp), MAX(timestamp), COUNT(*), list(DISTINCT source)
             FROM ohlc_data
@@ -653,6 +715,7 @@ def delete_ohlc_data(
         before = con.execute(f"SELECT COUNT(*) FROM ohlc_data WHERE {where}", params).fetchone()[0]
         con.execute(f"DELETE FROM ohlc_data WHERE {where}", params)
 
+    bump_data_version()
     logger.info("Deleted OHLC rows", extra={
         "instrument": instrument, "timeframe": timeframe,
         "start": str(start) if start else None, "end": str(end) if end else None,
@@ -680,6 +743,7 @@ def delete_tick_data(instrument: str, start=None, end=None) -> int:
         before = con.execute(f"SELECT COUNT(*) FROM tick_data WHERE {where}", params).fetchone()[0]
         con.execute(f"DELETE FROM tick_data WHERE {where}", params)
 
+    bump_data_version()
     logger.info("Deleted tick rows", extra={
         "instrument": instrument,
         "start": str(start) if start else None, "end": str(end) if end else None,
@@ -690,7 +754,7 @@ def delete_tick_data(instrument: str, start=None, end=None) -> int:
 
 def get_database_stats() -> dict:
     """Get overall database statistics."""
-    with get_db_connection() as con:
+    with read_connection() as con:
         total_rows = con.execute("SELECT COUNT(*) FROM ohlc_data").fetchone()[0]
 
         instruments = con.execute("""
@@ -767,7 +831,7 @@ def upsert_tick_data(df: pd.DataFrame, instrument: str) -> int:
 
 def list_tick_instruments() -> List[str]:
     """List all unique instruments in the tick_data table."""
-    with get_db_connection() as con:
+    with read_connection() as con:
         rows = con.execute("SELECT DISTINCT instrument FROM tick_data ORDER BY instrument").fetchall()
         return [r[0] for r in rows]
 
@@ -776,7 +840,7 @@ def get_tick_coverage(instrument: str) -> Optional[dict]:
     """Get min/max timestamp and tick count for an instrument."""
     instrument = validate_instrument(instrument)
 
-    with get_db_connection() as con:
+    with read_connection() as con:
         result = con.execute("""
             SELECT MIN(timestamp), MAX(timestamp), COUNT(*)
             FROM tick_data
@@ -790,7 +854,7 @@ def get_tick_coverage(instrument: str) -> Optional[dict]:
 
 def get_tick_database_stats() -> dict:
     """Get tick_data table statistics."""
-    with get_db_connection() as con:
+    with read_connection() as con:
         total_rows = con.execute("SELECT COUNT(*) FROM tick_data").fetchone()[0]
 
         instruments = con.execute("""

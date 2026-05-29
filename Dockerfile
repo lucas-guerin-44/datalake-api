@@ -27,4 +27,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:8000/healthcheck || exit 1
 
+# Single worker on purpose: only one OS process can open the DuckDB file
+# read-write. Read concurrency comes from per-cursor reads + the threadpool
+# (see read_connection in src/core/datalake.py). Do NOT add --workers.
 CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]

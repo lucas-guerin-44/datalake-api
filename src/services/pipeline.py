@@ -19,6 +19,7 @@ from src.core.datalake import (
     write_transaction,
     get_db_connection,
 )
+from src.core.derivation_queue import enqueue as enqueue_derivation, notify as notify_worker
 
 
 def _count_existing_ohlc(instrument: str, timeframe: str, start, end) -> int:
@@ -175,6 +176,67 @@ def ingest_single_file(file: Path, instrument: str, timeframe: str, derive: bool
         },
     })
     return rows_inserted
+
+
+def ingest_single_file_queued(file: Path, instrument: str, timeframe: str) -> Dict:
+    """
+    Ingest a CSV/Excel file, committing the raw bars and a derivation task in ONE
+    transaction, then waking the worker. Derivation happens off the request path.
+
+    Returns {rows_inserted, queue_id, window}. queue_id/window are None for an
+    empty file. See src/core/derivation_queue.py.
+    """
+    instrument = validate_instrument(instrument)
+    timeframe = validate_timeframe(timeframe)
+
+    t_total = time.perf_counter()
+    init_duckdb()
+    df = _standardize(_read_raw(file))
+
+    queue_id = None
+    window = None
+    with write_transaction() as con:
+        rows_inserted = upsert_ohlc_data(df, instrument, timeframe)
+        if not df.empty:
+            window = (df["timestamp"].min(), df["timestamp"].max())
+            queue_id = enqueue_derivation(con, instrument, "ohlc", timeframe, window[0], window[1])
+
+    if queue_id is not None:
+        notify_worker()
+
+    logger.info("File ingested (derivation queued)", extra={
+        "file": str(file), "instrument": instrument, "timeframe": timeframe,
+        "rows_in_file": len(df), "queue_id": queue_id,
+        "timing_ms": {"total": int((time.perf_counter() - t_total) * 1000)},
+    })
+    return {"rows_inserted": rows_inserted, "queue_id": queue_id, "window": window}
+
+
+def ingest_tick_file_queued(file: Path, instrument: str) -> Dict:
+    """Tick counterpart of ingest_single_file_queued. Returns the same shape."""
+    instrument = validate_instrument(instrument)
+
+    t_total = time.perf_counter()
+    init_duckdb()
+    df = standardize_tick_csv(_read_raw_tick(file))
+
+    queue_id = None
+    window = None
+    with write_transaction() as con:
+        rows_inserted = upsert_tick_data(df, instrument)
+        if not df.empty:
+            window = (df["timestamp"].min(), df["timestamp"].max())
+            queue_id = enqueue_derivation(con, instrument, "ticks", None, window[0], window[1])
+
+    if queue_id is not None:
+        notify_worker()
+
+    logger.info("Tick file ingested (derivation queued)", extra={
+        "file": str(file), "instrument": instrument,
+        "rows_in_file": len(df), "queue_id": queue_id,
+        "timing_ms": {"total": int((time.perf_counter() - t_total) * 1000)},
+    })
+    return {"rows_inserted": rows_inserted, "queue_id": queue_id, "window": window}
 
 
 def ingest_dataframe(df: pd.DataFrame, instrument: str, timeframe: str, derive: bool = True) -> int:

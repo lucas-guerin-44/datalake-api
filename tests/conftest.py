@@ -10,6 +10,9 @@ import os
 # must be set before any src module loads — not inside a fixture.
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
+# Don't spawn the derivation worker thread in tests — they drive the queue
+# deterministically via derivation_queue.drain()/process_one().
+os.environ.setdefault("DERIVATION_WORKER_AUTOSTART", "false")
 
 import sys
 from datetime import datetime

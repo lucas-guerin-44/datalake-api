@@ -6,11 +6,14 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 
+import os
+
 from src.middleware.logging_config import setup_logging, get_logger
 from src.middleware.middleware import RequestLoggingMiddleware
 from src.middleware.ratelimit import limiter
 from src.core.database import init_db, User
 from src.core.datalake import init_duckdb, _write_tx_lock
+from src.core import derivation_queue
 from src.config import validate_secrets
 from src.auth.auth import ScopedAuth
 
@@ -82,12 +85,19 @@ def startup_event():
     validate_secrets(logger)
     init_db()
     init_duckdb()
+    # Start the derivation worker. Any tasks left 'pending' by a crash are picked
+    # up here automatically (derivation is idempotent). Disable in tests via
+    # DERIVATION_WORKER_AUTOSTART=false so they drain the queue deterministically.
+    if os.getenv("DERIVATION_WORKER_AUTOSTART", "true").lower() in ("1", "true", "yes"):
+        derivation_queue.start_worker()
     logger.info("Database initialized successfully")
 
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """Block until in-flight DuckDB writes finish so SIGTERM can't interrupt a transaction."""
+    """Stop the derivation worker, then block until in-flight writes finish so SIGTERM can't interrupt a transaction."""
+    # Stop the worker first so it can't start a NEW derive while we're draining.
+    derivation_queue.stop_worker(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
     logger.info("Shutdown: waiting for in-flight writes", extra={"timeout_s": SHUTDOWN_WRITE_WAIT_SECONDS})
     acquired = _write_tx_lock.acquire(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
     if acquired:

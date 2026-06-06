@@ -17,7 +17,13 @@ from src.core import derivation_queue
 from src.config import validate_secrets
 from src.auth.auth import ScopedAuth
 
-SHUTDOWN_WRITE_WAIT_SECONDS = 25.0
+# Shutdown budget, split in two phases. The SUM must stay below the
+# docker-compose `stop_grace_period` (45s) or Docker SIGKILLs us mid-write — the
+# exact kill-during-checkpoint that risks DuckDB corruption. Phase 1 lets the
+# derivation worker finish its current task; phase 2 then waits out any in-flight
+# ingest's (short) raw upsert. 30 + 10 = 40s < 45s, leaving margin.
+SHUTDOWN_WORKER_WAIT_SECONDS = float(os.getenv("SHUTDOWN_WORKER_WAIT_SECONDS", "30"))
+SHUTDOWN_WRITE_WAIT_SECONDS = float(os.getenv("SHUTDOWN_WRITE_WAIT_SECONDS", "10"))
 from src.routes import (
     catalog_router,
     instruments_router,
@@ -96,8 +102,9 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     """Stop the derivation worker, then block until in-flight writes finish so SIGTERM can't interrupt a transaction."""
-    # Stop the worker first so it can't start a NEW derive while we're draining.
-    derivation_queue.stop_worker(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
+    # Stop the worker first so it can't start a NEW derive while we're draining;
+    # this also waits out the worker's current derive task (phase 1 of the budget).
+    derivation_queue.stop_worker(timeout=SHUTDOWN_WORKER_WAIT_SECONDS)
     logger.info("Shutdown: waiting for in-flight writes", extra={"timeout_s": SHUTDOWN_WRITE_WAIT_SECONDS})
     acquired = _write_tx_lock.acquire(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
     if acquired:

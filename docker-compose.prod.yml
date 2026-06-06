@@ -59,13 +59,18 @@ services:
           memory: 4g
           cpus: "2.0"
     restart: unless-stopped
-    # Let the FastAPI shutdown hook drain in-flight DuckDB writes before Docker SIGKILLs.
-    stop_grace_period: 30s
+    # Let the FastAPI shutdown hook drain the derivation worker + in-flight DuckDB
+    # writes before Docker SIGKILLs. Must exceed api.py's SHUTDOWN_WORKER_WAIT +
+    # SHUTDOWN_WRITE_WAIT budget (30 + 10 = 40s) — see that file.
+    stop_grace_period: 45s
+    # journald (not json-file) so the API's logs land in the host system journal
+    # and SURVIVE container recreation. After the 2026-06-06 incident the dead
+    # container's logs were gone (json-file dies with the container), making the
+    # crash unprovable. `docker logs` still works; so does `journalctl -t ohlc-datalake-api`.
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "50m"
-        max-file: "5"
+        tag: "ohlc-datalake-api"
     networks:
       - datalake-network
 

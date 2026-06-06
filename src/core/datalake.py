@@ -34,9 +34,18 @@ def _get_shared_connection() -> duckdb.DuckDBPyConnection:
             if _db_connection is None:
                 _db_connection = duckdb.connect(str(DUCKDB_PATH))
                 _db_connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+                # Spill to disk on the data volume when an operation exceeds the
+                # memory_limit, instead of letting the process grow until the
+                # cgroup OOM-kills the container mid-write (a corruption risk, and
+                # the leading suspect for the 2026-06-06 incident on the RAM-tight
+                # host). The data volume has ample disk vs. the small memory cap.
+                tmp_dir = DUCKDB_PATH.parent / "duckdb_tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                _db_connection.execute(f"SET temp_directory = '{tmp_dir.as_posix()}'")
                 logger.info("DuckDB connection opened", extra={
                     "path": str(DUCKDB_PATH),
                     "memory_limit": DUCKDB_MEMORY_LIMIT,
+                    "temp_directory": str(tmp_dir),
                 })
     return _db_connection
 

@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, File, Request, UploadFile, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from src.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
+from src.core.concurrency import write_slot
 from src.middleware.logging_config import get_logger
 from src.core.database import User
 from src.core.datalake import derive_ohlc_timeframes, derive_ohlc_from_ticks, write_transaction, list_instruments
@@ -91,6 +93,7 @@ async def ingest_file_api(
     derive: bool = Form(True, description="Auto-derive higher timeframes from the ingested window"),
     background: bool = Form(False, description="Run derivation as a background job and return a job id"),
     current_user: User = Depends(ScopedAuth("write")),
+    _wslot: None = Depends(write_slot),
 ):
     """Ingest a single CSV/Excel file into DuckDB. Requires write scope."""
     _check_upload_size(request)
@@ -100,13 +103,17 @@ async def ingest_file_api(
     raw_bytes = await _read_upload_capped(file)
     tmp_path = _save_upload(file, raw_bytes)
 
+    # The ingest+derive below is blocking, CPU/DB-bound work. This route is
+    # `async def`, so it runs on the single uvicorn event loop — calling it
+    # inline would freeze every other request (including /healthcheck/ready) for
+    # the whole ingest, which under a burst looks like the API has crashed. Push
+    # it to the threadpool so the loop stays responsive. See datalake-api-i8e.
     try:
         if background and derive:
             # Do the raw upsert synchronously (fast), queue derivation as a job.
-            ingest_single_file(tmp_path, instrument, timeframe, derive=False)
-            import pandas as pd  # local import keeps route import cheap
+            await run_in_threadpool(ingest_single_file, tmp_path, instrument, timeframe, False)
             from src.services.pipeline import _read_raw, _standardize
-            df = _standardize(_read_raw(tmp_path))
+            df = await run_in_threadpool(lambda: _standardize(_read_raw(tmp_path)))
             job = create_job(
                 "derive_ohlc",
                 meta={"instrument": instrument, "source_timeframe": timeframe},
@@ -123,7 +130,7 @@ async def ingest_file_api(
                 "derive_job_id": job.id,
             }
 
-        ingest_single_file(tmp_path, instrument, timeframe, derive=derive)
+        await run_in_threadpool(ingest_single_file, tmp_path, instrument, timeframe, derive)
         return {"status": "ok", "instrument": instrument, "timeframe": timeframe, "derived": derive}
     except HTTPException:
         raise
@@ -151,7 +158,8 @@ async def ingest_batch_api(
     for f in files:
         try:
             instrument, timeframe = parse_filename_meta(f)
-            ingest_single_file(f, instrument, timeframe, derive=derive)
+            # Offload each file so a large batch doesn't freeze the event loop.
+            await run_in_threadpool(ingest_single_file, f, instrument, timeframe, derive)
             results.append({"file": f.name, "status": "ok"})
         except Exception as e:
             results.append({"file": f.name, "status": "error", "error": str(e)})
@@ -168,6 +176,7 @@ async def ingest_tick_file_api(
     derive: bool = Form(True, description="Auto-derive OHLC bars (M1..D1) from the ingested ticks"),
     background: bool = Form(False, description="Run derivation as a background job and return a job id"),
     current_user: User = Depends(ScopedAuth("write")),
+    _wslot: None = Depends(write_slot),
 ):
     """Ingest a single tick CSV file into DuckDB. Requires write scope."""
     _check_upload_size(request)
@@ -176,11 +185,13 @@ async def ingest_tick_file_api(
     raw_bytes = await _read_upload_capped(file)
     tmp_path = _save_upload(file, raw_bytes)
 
+    # Offloaded to the threadpool so the ingest+derive doesn't block the event
+    # loop — see the /ingest handler above and datalake-api-i8e.
     try:
         if background and derive:
-            rows = ingest_tick_file(tmp_path, instrument, derive=False)
+            rows = await run_in_threadpool(ingest_tick_file, tmp_path, instrument, False)
             from src.services.pipeline import _read_raw_tick, standardize_tick_csv
-            df = standardize_tick_csv(_read_raw_tick(tmp_path))
+            df = await run_in_threadpool(lambda: standardize_tick_csv(_read_raw_tick(tmp_path)))
             job = create_job("derive_ticks", meta={"instrument": instrument})
             background_tasks.add_task(
                 _run_derive_ticks_job,
@@ -194,7 +205,7 @@ async def ingest_tick_file_api(
                 "derive_job_id": job.id,
             }
 
-        rows = ingest_tick_file(tmp_path, instrument, derive=derive)
+        rows = await run_in_threadpool(ingest_tick_file, tmp_path, instrument, derive)
         return {"status": "ok", "instrument": instrument, "rows_inserted": rows, "derived": derive}
     except HTTPException:
         raise
@@ -219,7 +230,8 @@ async def ingest_tick_batch_api(
     for f in files:
         try:
             instrument, _ = parse_filename_meta(f)
-            rows = ingest_tick_file(f, instrument, derive=derive)
+            # Offload each file so a large batch doesn't freeze the event loop.
+            rows = await run_in_threadpool(ingest_tick_file, f, instrument, derive)
             results.append({"file": f.name, "status": "ok", "rows_inserted": rows})
         except Exception as e:
             results.append({"file": f.name, "status": "error", "error": str(e)})

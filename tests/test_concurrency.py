@@ -223,6 +223,35 @@ class TestQuerySlot:
             next(freed)
 
 
+class TestWriteSlot:
+    def test_acquires_and_releases_slot(self):
+        gen = concurrency.write_slot()
+        next(gen)  # acquire
+        with pytest.raises(StopIteration):
+            next(gen)  # release on teardown, no error
+
+    def test_returns_503_with_retry_after_when_saturated(self, monkeypatch):
+        sem = threading.BoundedSemaphore(1)
+        monkeypatch.setattr(concurrency, "_write_semaphore", sem)
+
+        held = concurrency.write_slot()
+        next(held)  # take the only write slot
+
+        blocked = concurrency.write_slot()
+        with pytest.raises(HTTPException) as exc:
+            next(blocked)
+        assert exc.value.status_code == 503
+        assert exc.value.headers["Retry-After"] == str(concurrency.WRITE_RETRY_AFTER_SECONDS)
+
+        # Releasing frees the slot again — a serial client's next ingest gets in.
+        with pytest.raises(StopIteration):
+            next(held)
+        freed = concurrency.write_slot()
+        next(freed)
+        with pytest.raises(StopIteration):
+            next(freed)
+
+
 # --- route-level integration through the ASGI stack --------------------------
 
 class TestRoutes:
@@ -275,6 +304,28 @@ class TestRoutes:
         ingest_dataframe(_sample_bars(2), "EURUSD", "M1", derive=False)  # bumps version
         assert client.get("/catalog").status_code == 200
         assert calls["n"] == 2  # recomputed after the write
+
+    def test_ingest_routes_guarded_by_write_slot(self):
+        """The write path must carry write_slot backpressure, not just exist."""
+        from src.api import app
+        from src.core.concurrency import write_slot
+
+        def _flatten_calls(dependant):
+            calls = []
+            for sub in dependant.dependencies:
+                if sub.call is not None:
+                    calls.append(sub.call)
+                calls.extend(_flatten_calls(sub))
+            return calls
+
+        def deps_of(path):
+            for route in app.routes:
+                if getattr(route, "path", None) == path:
+                    return _flatten_calls(route.dependant)
+            raise AssertionError(f"route {path} not found")
+
+        for path in ("/ingest", "/ingest/ticks"):
+            assert write_slot in deps_of(path), f"{path} missing write_slot backpressure"
 
     def test_unhandled_error_returns_json_envelope(self, client, monkeypatch):
         import src.routes.catalog as catalog_route

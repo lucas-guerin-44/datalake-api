@@ -1,5 +1,6 @@
 services:
   postgres:
+    # Pin to digest in production for reproducibility: postgres:16-alpine@sha256:<digest>
     image: postgres:16-alpine
     container_name: datalake-postgres
     environment:

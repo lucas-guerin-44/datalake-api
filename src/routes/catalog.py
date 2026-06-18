@@ -8,7 +8,8 @@ from src.middleware.logging_config import get_logger
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
 from src.core import cache
-from src.core.datalake import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps, shift_timestamps_to_utc
+from src.core.queries import get_database_stats, get_tick_database_stats, list_instruments, list_timeframes, get_data_range, list_tick_instruments, get_tick_coverage, find_gaps
+from src.core.writes import shift_timestamps_to_utc
 from src.services.validators import validate_instrument, validate_timeframe
 from fastapi import Query
 from src.services.backup import export_catalog, restore_catalog, DEFAULT_BACKUP_ROOT, MANIFEST_FILENAME
@@ -17,6 +18,15 @@ from src.auth.auth import ScopedAuth
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+def _validate_backup_path(path: Path, label: str) -> Path:
+    """Ensure a user-supplied path stays inside the backup directory."""
+    resolved = path.resolve()
+    backup_root = DEFAULT_BACKUP_ROOT.resolve()
+    if not str(resolved).startswith(str(backup_root)):
+        raise HTTPException(status_code=400, detail=f"{label} must be inside the backup directory ({backup_root})")
+    return resolved
 
 
 def _build_catalog() -> dict:
@@ -78,8 +88,10 @@ def get_stats(
 
 def _run_export_job(job_id: str, output_dir: Optional[str]):
     try:
-        manifest = export_catalog(Path(output_dir) if output_dir else None)
+        manifest = export_catalog(_validate_backup_path(Path(output_dir), "output_dir") if output_dir else None)
         finish_job(job_id, result=manifest)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Export job failed", extra={"job_id": job_id})
         finish_job(job_id, error=str(e))
@@ -87,8 +99,10 @@ def _run_export_job(job_id: str, output_dir: Optional[str]):
 
 def _run_restore_job(job_id: str, manifest_path: str):
     try:
-        result = restore_catalog(Path(manifest_path))
+        result = restore_catalog(_validate_backup_path(Path(manifest_path), "manifest_path"))
         finish_job(job_id, result=result)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Restore job failed", extra={"job_id": job_id})
         finish_job(job_id, error=str(e))
@@ -154,11 +168,11 @@ def export_catalog_api(
     background_tasks: BackgroundTasks,
     output_dir: Optional[str] = Form(None, description=f"Target directory. Defaults to {DEFAULT_BACKUP_ROOT}/<timestamp>/"),
     background: bool = Form(False, description="Run as a background job and return a job id"),
-    current_user: User = Depends(ScopedAuth("write")),
+    current_user: User = Depends(ScopedAuth("admin")),
 ):
     """
     Export the entire datalake to partitioned Parquet plus a manifest.json.
-    Safe to run while the API is live (uses DuckDB's MVCC snapshot). Requires write scope.
+    Safe to run while the API is live (uses DuckDB's MVCC snapshot). Requires admin scope.
     """
     if background:
         job = create_job("catalog_export", meta={"output_dir": output_dir})
@@ -190,7 +204,7 @@ def restore_catalog_api(
         return {"status": "ok", "job_id": job.id}
 
     try:
-        return restore_catalog(Path(manifest_path))
+        return restore_catalog(_validate_backup_path(Path(manifest_path), "manifest_path"))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

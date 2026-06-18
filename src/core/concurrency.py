@@ -20,8 +20,16 @@ import threading
 
 from fastapi import HTTPException
 
-MAX_CONCURRENT_QUERIES = int(os.getenv("MAX_CONCURRENT_QUERIES", "8"))
-RETRY_AFTER_SECONDS = int(os.getenv("QUERY_RETRY_AFTER_SECONDS", "1"))
+
+def _int_env(name: str, default: str) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got: {os.getenv(name)!r}")
+
+
+MAX_CONCURRENT_QUERIES = _int_env("MAX_CONCURRENT_QUERIES", "8")
+RETRY_AFTER_SECONDS = _int_env("QUERY_RETRY_AFTER_SECONDS", "1")
 
 _query_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
 
@@ -52,8 +60,8 @@ def query_slot():
 # released the slot by the time the next request's dependency runs; only genuinely
 # overlapping writers are turned away. Retry-After is a touch longer than the read
 # value because a write+derive takes longer to clear than a read.
-MAX_CONCURRENT_WRITES = int(os.getenv("MAX_CONCURRENT_WRITES", "1"))
-WRITE_RETRY_AFTER_SECONDS = int(os.getenv("WRITE_RETRY_AFTER_SECONDS", "2"))
+MAX_CONCURRENT_WRITES = _int_env("MAX_CONCURRENT_WRITES", "1")
+WRITE_RETRY_AFTER_SECONDS = _int_env("WRITE_RETRY_AFTER_SECONDS", "2")
 
 _write_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_WRITES)
 

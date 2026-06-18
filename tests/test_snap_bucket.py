@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.datalake import snap_to_canonical_bucket
+from src.core.queries import snap_to_canonical_bucket
 
 
 def _ts(*values):

@@ -10,9 +10,8 @@ from src.middleware.logging_config import get_logger, set_correlation_id, clear_
 
 logger = get_logger(__name__)
 
-# Query-param keys whose values must never appear in logs. WebSocket upgrades
-# can carry credentials here as a browser fallback (browsers can't set custom
-# headers on `new WebSocket()`), and those requests pass through this middleware.
+# Query-param keys whose values must never appear in logs (e.g. API keys passed
+# as query parameters by some clients).
 _REDACTED_QUERY_KEYS = {"token", "api_key", "apikey", "access_token", "password"}
 
 

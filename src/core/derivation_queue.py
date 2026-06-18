@@ -26,8 +26,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-import pandas as pd
-
 from src.middleware.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -59,14 +57,6 @@ class Task:
         )
 
 
-def _to_naive_utc(ts) -> datetime:
-    """Match ohlc_data's naive-UTC TIMESTAMP column."""
-    t = pd.Timestamp(ts)
-    if t.tz is not None:
-        t = t.tz_convert("UTC").tz_localize(None)
-    return t.to_pydatetime()
-
-
 # --- enqueue (called inside the caller's write_transaction) -------------------
 
 def enqueue(con, instrument: str, source_kind: str, source_timeframe: Optional[str],
@@ -75,6 +65,7 @@ def enqueue(con, instrument: str, source_kind: str, source_timeframe: Optional[s
     Insert a pending derive task using the caller's connection so it commits
     atomically with the raw write. Returns the new task id.
     """
+    from src.core.datalake import to_naive_utc
     new_id = con.execute("SELECT nextval('derivation_queue_seq')").fetchone()[0]
     con.execute(
         """
@@ -84,7 +75,7 @@ def enqueue(con, instrument: str, source_kind: str, source_timeframe: Optional[s
         VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """,
         [new_id, instrument, source_kind, source_timeframe,
-         _to_naive_utc(start), _to_naive_utc(end)],
+         to_naive_utc(start), to_naive_utc(end)],
     )
     return new_id
 
@@ -151,9 +142,8 @@ def process_one() -> bool:
     if task is None:
         return False
 
-    from src.core.datalake import (
-        write_transaction, derive_ohlc_timeframes, derive_ohlc_from_ticks,
-    )
+    from src.core.datalake import write_transaction
+    from src.core.derive import derive_ohlc_timeframes, derive_ohlc_from_ticks
     try:
         with write_transaction() as con:
             still = con.execute(
@@ -204,17 +194,21 @@ def drain(max_tasks: Optional[int] = None) -> int:
     return n
 
 
-def wait_for(task_id: int) -> Optional[str]:
+def wait_for(task_id: int, timeout: float = 30.0) -> Optional[str]:
     """
     Block until `task_id` leaves 'pending', processing the queue ourselves so it
     completes even if the background worker is disabled. Returns its final status.
     """
-    while True:
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         st = status_of(task_id)
         if st != "pending":
             return st
         if not process_one():
             return status_of(task_id)
+        time.sleep(0.05)
+    return status_of(task_id)
 
 
 # --- background worker --------------------------------------------------------
@@ -262,3 +256,5 @@ def stop_worker(timeout: float = 10.0) -> None:
     t = _worker_thread
     if t is not None:
         t.join(timeout=timeout)
+        if t.is_alive():
+            logger.warning("Derivation worker still alive after %.1fs timeout", timeout)

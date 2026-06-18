@@ -13,7 +13,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core import datalake
+from src.core.queries import find_gaps
 from src.services.pipeline import ingest_dataframe
+
+datalake.find_gaps = find_gaps
 
 
 @pytest.fixture(autouse=True)

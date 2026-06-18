@@ -7,12 +7,14 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from src.config import ALLOW_PUBLIC_READS
 from src.core.database import User
 from src.core import cache
-from src.core.datalake import (
+from src.core.queries import (
     list_instruments,
     list_timeframes,
     get_data_range,
     list_tick_instruments,
     get_tick_coverage,
+)
+from src.core.writes import (
     delete_ohlc_data,
     delete_tick_data,
 )

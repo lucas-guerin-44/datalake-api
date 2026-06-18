@@ -32,16 +32,56 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core import datalake, cache, concurrency
+from src.core.queries import list_instruments, get_database_stats
+from src.core.writes import delete_ohlc_data
 from src.services.pipeline import ingest_dataframe
+
+datalake.list_instruments = list_instruments
+datalake.delete_ohlc_data = delete_ohlc_data
+datalake.get_database_stats = get_database_stats
 
 
 @pytest.fixture
 def client():
     from src.api import app
+    import src.core.database as db_mod
+    from src.core.database import Base, User, APIKey
+    from src.auth.auth import generate_api_key, hash_api_key
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    # Patch the real database engine to use in-memory SQLite for this test.
+    test_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=test_engine)
+    TestSession = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(db_mod, "engine", test_engine)
+    monkeypatch.setattr(db_mod, "SessionLocal", TestSession)
+
+    # Create an admin user + key so authenticated routes work.
+    db = TestSession()
+    user = User(username="testadmin", email="admin@test.com", hashed_password="x", is_active=True)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    full_key, prefix = generate_api_key()
+    db.add(APIKey(
+        user_id=user.id, key_hash=hash_api_key(full_key), prefix=prefix,
+        name="test-key", scopes=["admin"], is_active=True,
+    ))
+    db.commit()
+    db.close()
+
     with patch("src.api.init_db"):
-        # raise_server_exceptions=False so we can observe the JSON 500 envelope
-        # instead of the exception propagating out of the test client.
-        return TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app, raise_server_exceptions=False, headers={"X-API-Key": full_key})
+    yield client
+    monkeypatch.undo()
+    Base.metadata.drop_all(bind=test_engine)
 
 
 @pytest.fixture(autouse=True)

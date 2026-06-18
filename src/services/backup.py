@@ -8,6 +8,7 @@ partitioning to recover the partition columns. Restore is idempotent (ON CONFLIC
 merges rows).
 """
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,9 @@ def export_catalog(output_dir: Path = None) -> Dict[str, Any]:
     if ticks_dir.exists():
         shutil.rmtree(ticks_dir)
 
+    _validate_parquet_path(ohlc_dir)
+    _validate_parquet_path(ticks_dir)
+
     with get_db_connection() as con:
         ohlc_count = con.execute("SELECT COUNT(*) FROM ohlc_data").fetchone()[0]
         tick_count = con.execute("SELECT COUNT(*) FROM tick_data").fetchone()[0]
@@ -120,6 +124,16 @@ def export_catalog(output_dir: Path = None) -> Dict[str, Any]:
     return manifest
 
 
+_SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9_/\-. :]+$")
+
+
+def _validate_parquet_path(path: Path) -> None:
+    """Reject paths with characters that could inject SQL when interpolated into read_parquet()."""
+    posix = path.as_posix()
+    if not _SAFE_PATH_RE.match(posix):
+        raise ValueError(f"Path contains unsafe characters: {posix!r}")
+
+
 def restore_catalog(manifest_path: Path) -> Dict[str, Any]:
     """
     Re-ingest a previously exported catalog. Merges into existing tables via
@@ -139,6 +153,9 @@ def restore_catalog(manifest_path: Path) -> Dict[str, Any]:
 
     ohlc_path = Path(manifest["ohlc"]["path"])
     ticks_path = Path(manifest["ticks"]["path"])
+
+    for p in (ohlc_path, ticks_path):
+        _validate_parquet_path(p)
 
     ohlc_restored = 0
     ticks_restored = 0

@@ -1,26 +1,20 @@
 """Ingest routes - upload and batch ingest data files."""
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, File, Request, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, Form, File, Request, UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
 
 from src.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 from src.core.concurrency import write_slot
 from src.middleware.logging_config import get_logger
 from src.core.database import User
-from src.core.datalake import list_instruments
 from src.core import derivation_queue
 from src.services.pipeline import (
     ingest_single_file, ingest_tick_file, ingest_single_file_queued,
-    ingest_tick_file_queued, parse_filename_meta, ingest_dataframe, DEFAULT_STAGING,
+    ingest_tick_file_queued, parse_filename_meta, DEFAULT_STAGING,
 )
 from src.services.validators import validate_instrument, validate_timeframe, sanitize_filename
-from src.services.jobs import create_job, finish_job
-from src.services.mt5_client import fetch_m1_bars, ping as mt5_ping, MT5BridgeError
-from src.middleware.ratelimit import limiter
 from src.auth.auth import ScopedAuth
 
 logger = get_logger(__name__)
@@ -67,6 +61,76 @@ async def _read_upload_capped(file: UploadFile) -> bytes:
     return bytes(buf)
 
 
+async def _handle_file_ingest(
+    request: Request,
+    file: UploadFile,
+    instrument: str,
+    derive: bool,
+    wait: bool,
+    sync_ingest_fn: Callable,
+    queued_ingest_fn: Callable,
+    build_response: Callable,
+    timeframe: Optional[str] = None,
+):
+    """Shared handler for single-file ingest (OHLC and tick)."""
+    _check_upload_size(request)
+    instrument = validate_instrument(instrument)
+    if timeframe is not None:
+        timeframe = validate_timeframe(timeframe)
+
+    raw_bytes = await _read_upload_capped(file)
+    tmp_path = _save_upload(file, raw_bytes)
+
+    try:
+        if not derive:
+            result = await run_in_threadpool(sync_ingest_fn, tmp_path, instrument, timeframe, False) if timeframe is not None else await run_in_threadpool(sync_ingest_fn, tmp_path, instrument, False)
+            return build_response(instrument, result, timeframe=timeframe, derived=False)
+
+        res = await run_in_threadpool(queued_ingest_fn, tmp_path, instrument, timeframe) if timeframe is not None else await run_in_threadpool(queued_ingest_fn, tmp_path, instrument)
+        if wait and res["queue_id"] is not None:
+            final = await run_in_threadpool(derivation_queue.wait_for, res["queue_id"])
+            return build_response(instrument, res, timeframe=timeframe, derived=final)
+        return build_response(instrument, res, timeframe=timeframe, derived="queued")
+    except HTTPException:
+        raise
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Ingest failed unexpectedly")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+async def _handle_batch_ingest(
+    file_filter: Callable[[Path], bool],
+    parse_meta: Callable[[Path], tuple],
+    sync_ingest_fn: Callable,
+    derive: bool,
+    empty_message: str,
+):
+    """Shared handler for batch ingest (OHLC and tick)."""
+    files = sorted(p for p in DEFAULT_STAGING.iterdir() if file_filter(p))
+    if not files:
+        return {"status": "empty", "message": empty_message}
+
+    results = []
+    for f in files:
+        try:
+            meta = parse_meta(f)
+            await run_in_threadpool(sync_ingest_fn, f, *meta, derive)
+            results.append({"file": f.name, "status": "ok"})
+        except Exception as e:
+            results.append({"file": f.name, "status": "error", "error": str(e)})
+
+    return {"results": results}
+
+
+# --- OHLC endpoints -----------------------------------------------------------
+
+
+def _ohlc_response(instrument, result, timeframe=None, derived=False):
+    return {"status": "ok", "instrument": instrument, "timeframe": timeframe, "derived": derived}
+
+
 @router.post("/ingest")
 async def ingest_file_api(
     request: Request,
@@ -78,41 +142,14 @@ async def ingest_file_api(
     current_user: User = Depends(ScopedAuth("write")),
     _wslot: None = Depends(write_slot),
 ):
-    """
-    Ingest a single CSV/Excel file into DuckDB. Requires write scope.
-
-    Raw bars commit synchronously. With derive=True (default) the higher
-    timeframes are derived off the request path by the durable queue worker, and
-    the response carries `derived: "queued"` + a `queue_id`. Pass wait=true to
-    block until that derivation finishes (`derived: "done"`). See
-    src/core/derivation_queue.py.
-    """
-    _check_upload_size(request)
-    instrument = validate_instrument(instrument)
-    timeframe = validate_timeframe(timeframe)
-
-    raw_bytes = await _read_upload_capped(file)
-    tmp_path = _save_upload(file, raw_bytes)
-
-    # Blocking DB work runs in the threadpool so the single event loop stays
-    # responsive during a burst (datalake-api-i8e). Derivation is queued, not
-    # run inline, so the request returns after just the raw write.
-    try:
-        if not derive:
-            await run_in_threadpool(ingest_single_file, tmp_path, instrument, timeframe, False)
-            return {"status": "ok", "instrument": instrument, "timeframe": timeframe, "derived": False}
-
-        res = await run_in_threadpool(ingest_single_file_queued, tmp_path, instrument, timeframe)
-        if wait and res["queue_id"] is not None:
-            final = await run_in_threadpool(derivation_queue.wait_for, res["queue_id"])
-            return {"status": "ok", "instrument": instrument, "timeframe": timeframe,
-                    "derived": final, "queue_id": res["queue_id"]}
-        return {"status": "ok", "instrument": instrument, "timeframe": timeframe,
-                "derived": "queued", "queue_id": res["queue_id"]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    """Ingest a single CSV/Excel file into DuckDB. Requires write scope."""
+    return await _handle_file_ingest(
+        request, file, instrument, derive, wait,
+        sync_ingest_fn=ingest_single_file,
+        queued_ingest_fn=ingest_single_file_queued,
+        build_response=_ohlc_response,
+        timeframe=timeframe,
+    )
 
 
 @router.post("/ingest-batch")
@@ -120,28 +157,21 @@ async def ingest_batch_api(
     derive: bool = Form(True, description="Auto-derive higher timeframes from the ingested window"),
     current_user: User = Depends(ScopedAuth("write")),
 ):
-    """
-    Ingest all CSV/Excel files in the staging directory. Requires write scope.
+    """Ingest all CSV/Excel files in the staging directory. Requires write scope."""
+    return await _handle_batch_ingest(
+        file_filter=lambda p: p.suffix.lower() in {".csv", ".xlsx", ".xls"},
+        parse_meta=parse_filename_meta,
+        sync_ingest_fn=ingest_single_file,
+        derive=derive,
+        empty_message="No files found",
+    )
 
-    The folder is hardcoded to DEFAULT_STAGING — we used to accept it as a form
-    parameter, but that let a write-scoped caller iterate any container-readable
-    directory. Drop files into `staging/` (bind-mounted on the VPS) instead.
-    """
-    files = sorted([p for p in DEFAULT_STAGING.iterdir() if p.suffix.lower() in {".csv", ".xlsx", ".xls"}])
-    if not files:
-        return {"status": "empty", "message": "No files found"}
 
-    results = []
-    for f in files:
-        try:
-            instrument, timeframe = parse_filename_meta(f)
-            # Offload each file so a large batch doesn't freeze the event loop.
-            await run_in_threadpool(ingest_single_file, f, instrument, timeframe, derive)
-            results.append({"file": f.name, "status": "ok"})
-        except Exception as e:
-            results.append({"file": f.name, "status": "error", "error": str(e)})
+# --- Tick endpoints -----------------------------------------------------------
 
-    return {"results": results}
+
+def _tick_response(instrument, result, timeframe=None, derived=False):
+    return {"status": "ok", "instrument": instrument, "rows_inserted": result["rows_inserted"], "derived": derived, "queue_id": result.get("queue_id")}
 
 
 @router.post("/ingest/ticks")
@@ -154,35 +184,13 @@ async def ingest_tick_file_api(
     current_user: User = Depends(ScopedAuth("write")),
     _wslot: None = Depends(write_slot),
 ):
-    """
-    Ingest a single tick CSV file into DuckDB. Requires write scope.
-
-    Ticks commit synchronously; OHLC derivation is queued off the request path
-    (derived: "queued" + queue_id), or pass wait=true to block until it finishes.
-    """
-    _check_upload_size(request)
-    instrument = validate_instrument(instrument)
-
-    raw_bytes = await _read_upload_capped(file)
-    tmp_path = _save_upload(file, raw_bytes)
-
-    # Blocking work to the threadpool (datalake-api-i8e); derivation is queued.
-    try:
-        if not derive:
-            rows = await run_in_threadpool(ingest_tick_file, tmp_path, instrument, False)
-            return {"status": "ok", "instrument": instrument, "rows_inserted": rows, "derived": False}
-
-        res = await run_in_threadpool(ingest_tick_file_queued, tmp_path, instrument)
-        if wait and res["queue_id"] is not None:
-            final = await run_in_threadpool(derivation_queue.wait_for, res["queue_id"])
-            return {"status": "ok", "instrument": instrument, "rows_inserted": res["rows_inserted"],
-                    "derived": final, "queue_id": res["queue_id"]}
-        return {"status": "ok", "instrument": instrument, "rows_inserted": res["rows_inserted"],
-                "derived": "queued", "queue_id": res["queue_id"]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    """Ingest a single tick CSV file into DuckDB. Requires write scope."""
+    return await _handle_file_ingest(
+        request, file, instrument, derive, wait,
+        sync_ingest_fn=ingest_tick_file,
+        queued_ingest_fn=ingest_tick_file_queued,
+        build_response=_tick_response,
+    )
 
 
 @router.post("/ingest-batch/ticks")
@@ -190,25 +198,21 @@ async def ingest_tick_batch_api(
     derive: bool = Form(True, description="Auto-derive OHLC bars (M1..D1) from the ingested ticks"),
     current_user: User = Depends(ScopedAuth("write")),
 ):
-    """
-    Ingest all tick CSV files matching {INSTRUMENT}_TICK_*.csv from the staging
-    directory. Requires write scope. Folder is hardcoded — see /ingest-batch.
-    """
-    files = sorted([p for p in DEFAULT_STAGING.iterdir() if p.suffix.lower() == ".csv" and "_TICK_" in p.name.upper()])
-    if not files:
-        return {"status": "empty", "message": "No tick files found"}
+    """Ingest all tick CSV files matching {INSTRUMENT}_TICK_*.csv from staging."""
+    def _tick_meta(f):
+        instrument, _ = parse_filename_meta(f)
+        return (instrument,)
 
-    results = []
-    for f in files:
-        try:
-            instrument, _ = parse_filename_meta(f)
-            # Offload each file so a large batch doesn't freeze the event loop.
-            rows = await run_in_threadpool(ingest_tick_file, f, instrument, derive)
-            results.append({"file": f.name, "status": "ok", "rows_inserted": rows})
-        except Exception as e:
-            results.append({"file": f.name, "status": "error", "error": str(e)})
+    return await _handle_batch_ingest(
+        file_filter=lambda p: p.suffix.lower() == ".csv" and "_TICK_" in p.name.upper(),
+        parse_meta=_tick_meta,
+        sync_ingest_fn=ingest_tick_file,
+        derive=derive,
+        empty_message="No tick files found",
+    )
 
-    return {"results": results}
+
+# --- Queue stats --------------------------------------------------------------
 
 
 @router.get("/ingest/queue")
@@ -219,97 +223,3 @@ async def ingest_queue_stats(current_user: User = Depends(ScopedAuth("read"))):
     means the worker is falling behind; a non-zero `error` needs a look.
     """
     return await run_in_threadpool(derivation_queue.queue_stats)
-
-
-# --- MT5 refresh (pulls M1 from Wine-hosted MT5 bridge, derives upward) ---
-
-class RefreshRequest(BaseModel):
-    instruments: Optional[List[str]] = Field(
-        None,
-        description="Symbols to refresh. Defaults to every instrument currently in the catalog.",
-    )
-    days: int = Field(7, ge=1, le=365, description="Fetch the last N days of M1 bars.")
-
-
-def _run_refresh_job(job_id: str, instruments: List[str], start: datetime, end: datetime):
-    """Background job: for each instrument, pull M1 from MT5 and derive upward to D1."""
-    per_instrument = {}
-    errors = {}
-    total_rows = 0
-
-    for symbol in instruments:
-        try:
-            df = fetch_m1_bars(symbol, start, end)
-            if df.empty:
-                per_instrument[symbol] = {"rows": 0, "derived": {}}
-                continue
-
-            rows = ingest_dataframe(df, symbol, "M1", derive=True)
-            per_instrument[symbol] = {
-                "rows": rows,
-                "window": {"start": str(df["timestamp"].min()), "end": str(df["timestamp"].max())},
-            }
-            total_rows += rows
-        except Exception as e:
-            logger.exception("Refresh failed for instrument", extra={"symbol": symbol, "job_id": job_id})
-            errors[symbol] = str(e)
-
-    result = {
-        "instruments": per_instrument,
-        "errors": errors,
-        "total_rows": total_rows,
-        "window": {"start": start.isoformat(), "end": end.isoformat()},
-    }
-    # Job succeeds even if some instruments failed — per-instrument errors are in the result.
-    # Only fail the job if every instrument errored.
-    if errors and not per_instrument:
-        finish_job(job_id, error=f"All instruments failed. Sample: {next(iter(errors.values()))}")
-    else:
-        finish_job(job_id, result=result)
-
-
-@router.post("/ingest/refresh")
-@limiter.limit("6/hour")
-async def ingest_refresh(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    req: RefreshRequest = RefreshRequest(),
-    current_user: User = Depends(ScopedAuth("write")),
-):
-    """
-    Refresh M1 OHLC from MT5 for the last N days, then derive M5..D1.
-
-    Iterates the datalake's current instrument catalog by default so the source
-    of truth for "which symbols matter" stays in the API, not the MT5 side.
-    Runs as a background job — returns a job id you can poll via /jobs/{id}.
-    """
-    if not mt5_ping():
-        raise HTTPException(
-            status_code=503,
-            detail="MT5 bridge unreachable. Check MT5_BRIDGE_URL and that the Wine-side server is running.",
-        )
-
-    if req.instruments:
-        instruments = [validate_instrument(s) for s in req.instruments]
-    else:
-        instruments = list_instruments()
-
-    if not instruments:
-        return {"status": "empty", "message": "No instruments to refresh."}
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=req.days)
-
-    job = create_job(
-        "mt5_refresh",
-        meta={"instruments": instruments, "days": req.days, "start": start.isoformat(), "end": end.isoformat()},
-    )
-    background_tasks.add_task(_run_refresh_job, job.id, instruments, start, end)
-
-    return {
-        "status": "queued",
-        "job_id": job.id,
-        "instruments": instruments,
-        "days": req.days,
-        "window": {"start": start.isoformat(), "end": end.isoformat()},
-    }

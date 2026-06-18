@@ -4,7 +4,7 @@ User creation and key minting is an operator task — use `scripts/mint_api_key.
 or the bootstrap snippet in deploy/RUNBOOK.md. There is no HTTP self-service
 registration or login flow by design.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,7 +43,7 @@ def create_new_api_key(
 
     expires_at = None
     if key_data.expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=key_data.expires_in_days)
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=key_data.expires_in_days)
 
     full_key, prefix = generate_api_key()
     api_key = create_api_key(
@@ -72,15 +72,7 @@ def list_api_keys(
 ):
     """List all API keys owned by the calling admin's user (metadata only)."""
     keys = get_api_keys_by_user(db, current_user.id)
-    return [
-        APIKeyResponse(
-            id=k.id, prefix=k.prefix, name=k.name, scopes=k.scopes,
-            expires_at=k.expires_at.isoformat() if k.expires_at else None,
-            last_used_at=k.last_used_at.isoformat() if k.last_used_at else None,
-            is_active=k.is_active, created_at=k.created_at.isoformat(),
-        )
-        for k in keys
-    ]
+    return [APIKeyResponse.from_orm_key(k) for k in keys]
 
 
 @router.get("/api-keys/{key_id}", response_model=APIKeyResponse)
@@ -94,12 +86,7 @@ def get_api_key(
     if not api_key or api_key.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    return APIKeyResponse(
-        id=api_key.id, prefix=api_key.prefix, name=api_key.name, scopes=api_key.scopes,
-        expires_at=api_key.expires_at.isoformat() if api_key.expires_at else None,
-        last_used_at=api_key.last_used_at.isoformat() if api_key.last_used_at else None,
-        is_active=api_key.is_active, created_at=api_key.created_at.isoformat(),
-    )
+    return APIKeyResponse.from_orm_key(api_key)
 
 
 @router.patch("/api-keys/{key_id}", response_model=APIKeyResponse)
@@ -120,7 +107,7 @@ def update_api_key_endpoint(
     if key_data.expires_in_days is not None:
         expires_at = (
             None if key_data.expires_in_days == 0
-            else datetime.utcnow() + timedelta(days=key_data.expires_in_days)
+            else datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=key_data.expires_in_days)
         )
 
     updated = update_api_key(
@@ -130,12 +117,7 @@ def update_api_key_endpoint(
     )
     logger.info("API key updated", extra={"prefix": api_key.prefix, "username": current_user.username})
 
-    return APIKeyResponse(
-        id=updated.id, prefix=updated.prefix, name=updated.name, scopes=updated.scopes,
-        expires_at=updated.expires_at.isoformat() if updated.expires_at else None,
-        last_used_at=updated.last_used_at.isoformat() if updated.last_used_at else None,
-        is_active=updated.is_active, created_at=updated.created_at.isoformat(),
-    )
+    return APIKeyResponse.from_orm_key(updated)
 
 
 @router.delete("/api-keys/{key_id}", status_code=204)

@@ -3,8 +3,8 @@ PostgreSQL database setup and models for user/auth metadata.
 OHLC data is stored in DuckDB (see datalake.py).
 """
 import os
-from datetime import datetime
-from typing import Optional, List, Dict
+from datetime import datetime, timezone
+from typing import Optional, List
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, ForeignKey, JSON
@@ -15,6 +15,8 @@ from sqlalchemy.pool import QueuePool
 from src.middleware.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_SENTINEL = object()  # Distinguishes "not provided" from "explicitly None"
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -42,20 +44,10 @@ class User(Base):
     email = Column(String(100), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
-
-    def to_dict(self) -> Dict:
-        return {
-            "id": self.id,
-            "username": self.username,
-            "email": self.email,
-            "is_active": self.is_active,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
 
 
 class APIKey(Base):
@@ -67,28 +59,13 @@ class APIKey(Base):
     key_hash = Column(String(255), nullable=False)
     prefix = Column(String(16), nullable=False, index=True)
     name = Column(String(100), nullable=False)
-    scopes = Column(JSON, nullable=False, default=["read"])
+    scopes = Column(JSON, nullable=False, default=lambda: ["read"])
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="api_keys")
-
-    def to_dict(self, include_prefix: bool = True) -> Dict:
-        result = {
-            "id": self.id,
-            "user_id": self.user_id,
-            "name": self.name,
-            "scopes": self.scopes,
-            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
-            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
-            "is_active": self.is_active,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
-        if include_prefix:
-            result["prefix"] = self.prefix
-        return result
 
 
 # --- Database lifecycle ---
@@ -137,10 +114,6 @@ def get_user_by_username(db: Session, username: str) -> Optional[User]:
     return db.query(User).filter(User.username == username).first()
 
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    return db.query(User).filter(User.email == email).first()
-
-
 def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
     return db.query(User).filter(User.id == user_id).first()
 
@@ -174,20 +147,20 @@ def get_api_keys_by_user(db: Session, user_id: int) -> List[APIKey]:
 
 
 def update_api_key_last_used(db: Session, api_key: APIKey) -> None:
-    api_key.last_used_at = datetime.utcnow()
+    api_key.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
 
 
 def update_api_key(
     db: Session, api_key: APIKey,
     name: Optional[str] = None, scopes: Optional[List[str]] = None,
-    expires_at: Optional[datetime] = None, is_active: Optional[bool] = None,
+    expires_at: Optional[datetime] = _SENTINEL, is_active: Optional[bool] = None,
 ) -> APIKey:
     if name is not None:
         api_key.name = name
     if scopes is not None:
         api_key.scopes = scopes
-    if expires_at is not None:
+    if expires_at is not _SENTINEL:
         api_key.expires_at = expires_at
     if is_active is not None:
         api_key.is_active = is_active

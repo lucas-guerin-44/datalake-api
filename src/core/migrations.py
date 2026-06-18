@@ -54,5 +54,11 @@ def run_migrations(con):
             logger.warning("Migration missing up()", extra={"version": version})
             continue
         logger.info("Applying migration", extra={"version": version})
-        mod.up(con)
-        con.execute("INSERT INTO _schema_migrations (version) VALUES (?)", [version])
+        con.execute("BEGIN TRANSACTION")
+        try:
+            mod.up(con)
+            con.execute("INSERT INTO _schema_migrations (version) VALUES (?)", [version])
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise

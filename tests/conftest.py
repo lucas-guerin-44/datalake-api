@@ -6,10 +6,10 @@ Uses in-memory SQLite to avoid requiring PostgreSQL for unit tests.
 import os
 
 # Set required environment variables before importing src modules.
-# ScopedAuth / ws_require_auth capture ALLOW_PUBLIC_READS at route-import time, so it
+# ScopedAuth captures ALLOW_PUBLIC_READS at route-import time, so it
 # must be set before any src module loads — not inside a fixture.
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
-os.environ.setdefault("ALLOW_PUBLIC_READS", "true")
+os.environ.setdefault("ALLOW_PUBLIC_READS", "false")
 # Don't spawn the derivation worker thread in tests — they drive the queue
 # deterministically via derivation_queue.drain()/process_one().
 os.environ.setdefault("DERIVATION_WORKER_AUTOSTART", "false")
@@ -18,8 +18,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch
-
 import pytest
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
@@ -119,12 +117,4 @@ def inactive_user(db_session: Session) -> User:
     return user
 
 
-@pytest.fixture
-def mock_env_vars():
-    """Mock environment variables for testing."""
-    env_vars = {
-        "ALLOW_PUBLIC_READS": "true",
-        "DATABASE_URL": TEST_DATABASE_URL,
-    }
-    with patch.dict(os.environ, env_vars):
-        yield env_vars
+

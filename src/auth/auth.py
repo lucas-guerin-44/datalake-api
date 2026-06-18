@@ -1,12 +1,11 @@
 """Authentication and authorization — API keys only. JWT was removed intentionally;
 any browser/UI that needs session auth should layer on top of API keys."""
-import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status, Header, Request, WebSocket
+from fastapi import Depends, HTTPException, status, Header, Request
 from sqlalchemy.orm import Session
 
 from src.core.database import (
@@ -15,19 +14,9 @@ from src.core.database import (
 )
 from src.schemas import VALID_SCOPES
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
 
 API_KEY_PREFIX = "dk_"
-
-
-# --- Password utilities ---
-# Kept because `create_user` stores a hashed password in the `users.hashed_password`
-# NOT NULL column. Nothing authenticates with passwords anymore, so bootstrap users
-# with `get_password_hash(secrets.token_urlsafe(32))` and throw the plaintext away.
-
-def get_password_hash(password: str) -> str:
-    """Hash a password for storage in users.hashed_password."""
-    return pwd_context.hash(password)
 
 
 # --- API Key utilities ---
@@ -83,7 +72,7 @@ def authenticate_api_key(db: Session, api_key: str) -> Optional[tuple[User, APIK
         return None
     if not key_record.is_active:
         return None
-    if key_record.expires_at and key_record.expires_at < datetime.utcnow():
+    if key_record.expires_at and key_record.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
         return None
 
     user = get_user_by_id(db, key_record.user_id)
@@ -137,55 +126,3 @@ class ScopedAuth:
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "API-Key"},
         )
-
-
-# --- WebSocket authentication ---
-
-async def ws_require_auth(
-    ws: WebSocket,
-    db: Session,
-    required_scope: str,
-    allow_public: bool,
-) -> bool:
-    """
-    Validate an already-accepted WebSocket connection.
-
-    Credentials are read from the `X-API-Key` header only. Query-string credentials
-    are rejected outright — they leak into proxy access logs. Browser clients that
-    can't set WS headers should use a signed short-lived token flow instead; none
-    of our current clients are browser-based.
-
-    Returns True when the caller should proceed with streaming:
-      - authenticated API key (scope satisfied), or
-      - no credentials supplied AND allow_public is True.
-
-    Returns False after closing the socket with 4401 / 4403 when auth is
-    required and missing/invalid. Callers should `return` immediately.
-    """
-    api_key = ws.headers.get("x-api-key")
-
-    if api_key:
-        result = authenticate_api_key(db, api_key)
-        if result:
-            _, key_record = result
-            if check_scope(required_scope, key_record.scopes):
-                return True
-            await _ws_close_with_reason(ws, 4403, f"insufficient scope: {required_scope} required")
-            return False
-
-    if allow_public and not api_key:
-        return True
-
-    await _ws_close_with_reason(ws, 4401, "unauthorized")
-    return False
-
-
-async def _ws_close_with_reason(ws: WebSocket, code: int, message: str) -> None:
-    try:
-        await ws.send_text(json.dumps({"error": message}))
-    except Exception:
-        pass
-    try:
-        await ws.close(code=code)
-    except Exception:
-        pass

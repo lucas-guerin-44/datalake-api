@@ -31,6 +31,15 @@ class APIKeyResponse(BaseModel):
     is_active: bool
     created_at: str
 
+    @classmethod
+    def from_orm_key(cls, k) -> "APIKeyResponse":
+        return cls(
+            id=k.id, prefix=k.prefix, name=k.name, scopes=k.scopes,
+            expires_at=k.expires_at.isoformat() if k.expires_at else None,
+            last_used_at=k.last_used_at.isoformat() if k.last_used_at else None,
+            is_active=k.is_active, created_at=k.created_at.isoformat(),
+        )
+
 
 class APIKeyCreatedResponse(BaseModel):
     """Returned once at creation time — includes the full key."""

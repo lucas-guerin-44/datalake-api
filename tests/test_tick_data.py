@@ -17,6 +17,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.services.pipeline import standardize_tick_csv, _read_raw_tick
 from src.services.validators import validate_timeframe
 from src.core import datalake
+from src.core.queries import list_tick_instruments, get_tick_coverage, get_tick_database_stats
+from src.core.writes import upsert_tick_data
+
+datalake.upsert_tick_data = upsert_tick_data
+datalake.list_tick_instruments = list_tick_instruments
+datalake.get_tick_coverage = get_tick_coverage
+datalake.get_tick_database_stats = get_tick_database_stats
 
 
 @pytest.fixture(autouse=True)

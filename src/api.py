@@ -1,4 +1,6 @@
 """Main FastAPI application - wires up all route modules."""
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -31,7 +33,6 @@ from src.routes import (
     ingest_router,
     auth_router,
     health_router,
-    stream_router,
     jobs_router,
     backup_router,
     public_router,
@@ -40,7 +41,35 @@ from src.routes import (
 setup_logging()
 logger = get_logger(__name__)
 
-app = FastAPI(title="Datalake API", root_path="/api")
+
+@asynccontextmanager
+async def lifespan(app):
+    """Startup/shutdown lifecycle — replaces deprecated on_event hooks."""
+    # --- startup ---
+    logger.info("Starting up API")
+    validate_secrets(logger)
+    init_db()
+    init_duckdb()
+    if os.getenv("DERIVATION_WORKER_AUTOSTART", "true").lower() in ("1", "true", "yes"):
+        derivation_queue.start_worker()
+    logger.info("Database initialized successfully")
+
+    yield
+
+    # --- shutdown ---
+    # Stop the worker first so it can't start a NEW derive while we're draining;
+    # this also waits out the worker's current derive task (phase 1 of the budget).
+    derivation_queue.stop_worker(timeout=SHUTDOWN_WORKER_WAIT_SECONDS)
+    logger.info("Shutdown: waiting for in-flight writes", extra={"timeout_s": SHUTDOWN_WRITE_WAIT_SECONDS})
+    acquired = _write_tx_lock.acquire(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
+    if acquired:
+        _write_tx_lock.release()
+        logger.info("Shutdown: no in-flight writes, exiting cleanly")
+    else:
+        logger.warning("Shutdown: timed out waiting for in-flight write; exiting anyway")
+
+
+app = FastAPI(title="Datalake API", root_path="/api", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -78,37 +107,6 @@ app.include_router(query_router)
 app.include_router(ingest_router)
 app.include_router(auth_router)
 app.include_router(health_router)
-app.include_router(stream_router)
 app.include_router(jobs_router)
 app.include_router(backup_router)
 app.include_router(public_router)
-
-
-@app.on_event("startup")
-def startup_event():
-    """Initialize PostgreSQL tables and DuckDB schema on startup."""
-    logger.info("Starting up API")
-    validate_secrets(logger)
-    init_db()
-    init_duckdb()
-    # Start the derivation worker. Any tasks left 'pending' by a crash are picked
-    # up here automatically (derivation is idempotent). Disable in tests via
-    # DERIVATION_WORKER_AUTOSTART=false so they drain the queue deterministically.
-    if os.getenv("DERIVATION_WORKER_AUTOSTART", "true").lower() in ("1", "true", "yes"):
-        derivation_queue.start_worker()
-    logger.info("Database initialized successfully")
-
-
-@app.on_event("shutdown")
-def shutdown_event():
-    """Stop the derivation worker, then block until in-flight writes finish so SIGTERM can't interrupt a transaction."""
-    # Stop the worker first so it can't start a NEW derive while we're draining;
-    # this also waits out the worker's current derive task (phase 1 of the budget).
-    derivation_queue.stop_worker(timeout=SHUTDOWN_WORKER_WAIT_SECONDS)
-    logger.info("Shutdown: waiting for in-flight writes", extra={"timeout_s": SHUTDOWN_WRITE_WAIT_SECONDS})
-    acquired = _write_tx_lock.acquire(timeout=SHUTDOWN_WRITE_WAIT_SECONDS)
-    if acquired:
-        _write_tx_lock.release()
-        logger.info("Shutdown: no in-flight writes, exiting cleanly")
-    else:
-        logger.warning("Shutdown: timed out waiting for in-flight write; exiting anyway")

@@ -25,7 +25,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core import datalake, derivation_queue
+from src.core.derive import derive_ohlc_timeframes
 from src.services.pipeline import ingest_single_file_queued, ingest_tick_file_queued
+
+datalake.derive_ohlc_timeframes = derive_ohlc_timeframes
 
 
 @pytest.fixture(autouse=True)
@@ -141,9 +144,9 @@ def test_failed_derivation_parks_as_error_after_max_attempts(tmp_path, monkeypat
     def boom(*a, **k):
         raise RuntimeError("derive boom")
 
-    # process_one re-imports this symbol from the module each call, so patching
-    # the attribute takes effect.
-    monkeypatch.setattr(datalake, "derive_ohlc_timeframes", boom)
+    # process_one imports derive_ohlc_timeframes from src.core.derive, so patch there.
+    import src.core.derive as _derive_mod
+    monkeypatch.setattr(_derive_mod, "derive_ohlc_timeframes", boom)
 
     derivation_queue.drain()
 

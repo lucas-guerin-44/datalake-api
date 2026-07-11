@@ -107,34 +107,6 @@ Every ingest emits a structured log line with timing per phase and row-count del
 }
 ```
 
-## WebSocket Streaming
-
-Live-feed simulation by replaying historical data over WebSocket. Useful for backtesting dashboards.
-
-```bash
-# Stream ticks at real-time speed
-wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&speed=1"
-
-# Stream M5 bars at 60x speed (one bar per second)
-wscat -c "ws://localhost:8000/ws/bars?instrument=XAUUSD&timeframe=M5&speed=60"
-
-# Fast delivery for dashboard replay (consumer controls pacing)
-wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&speed=1000&max_delay=0.1"
-
-# Burst mode — no pacing, all rows as fast as possible
-wscat -c "ws://localhost:8000/ws/ticks?instrument=XAUUSD&max_delay=0"
-```
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `instrument` | required | Symbol to stream |
-| `timeframe` | required (bars only) | Bar timeframe (M5, H1, etc.) |
-| `start` / `end` | — | ISO-8601 time range filter |
-| `speed` | `1.0` | Playback multiplier (1 = real-time, 10 = 10x) |
-| `max_delay` | `10.0` | Max seconds between messages (0 = burst) |
-
-Each message is a JSON object. Stream ends with `{"done": true}`.
-
 ## Backup & Restore
 
 ### Export

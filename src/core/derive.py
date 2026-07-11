@@ -2,6 +2,8 @@
 OHLC timeframe derivation.
 Builds higher-timeframe bars from lower-timeframe source data.
 """
+import os
+from contextlib import contextmanager
 from typing import Optional
 
 import pandas as pd
@@ -112,6 +114,26 @@ def _derive_bars(
     ).fetchone()[0]
 
 
+DERIVATION_THREADS = int(os.getenv("DERIVATION_THREADS", "2"))
+
+
+@contextmanager
+def _derivation_session(con):
+    """
+    Context manager: tune DuckDB session for memory-efficient derivation,
+    then restore original settings. Must run inside an existing write transaction.
+    """
+    orig_io = con.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0]
+    orig_threads = con.execute("SELECT current_setting('threads')").fetchone()[0]
+    con.execute("SET preserve_insertion_order=false")
+    con.execute(f"SET threads={DERIVATION_THREADS}")
+    try:
+        yield
+    finally:
+        con.execute(f"SET preserve_insertion_order={orig_io}")
+        con.execute(f"SET threads={orig_threads}")
+
+
 def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -> dict:
     """
     Rebuild derived OHLC bars for all target timeframes larger than source_timeframe,
@@ -130,12 +152,13 @@ def derive_ohlc_timeframes(instrument: str, source_timeframe: str, start, end) -
     results: dict = {}
 
     with get_db_connection() as con:
-        for target, interval in _derivation_targets_for(src_sec):
-            source_where = "instrument = ? AND timeframe = ? AND timestamp >= ? AND timestamp < ?"
-            source_params = [instrument, source_timeframe, start_utc, end_utc]
-            cnt = _derive_bars(con, target, interval, instrument,
-                               "ohlc_data", source_where, source_params)
-            results[target] = cnt
+        with _derivation_session(con):
+            for target, interval in _derivation_targets_for(src_sec):
+                source_where = "instrument = ? AND timeframe = ? AND timestamp >= ? AND timestamp < ?"
+                source_params = [instrument, source_timeframe, start_utc, end_utc]
+                cnt = _derive_bars(con, target, interval, instrument,
+                                   "ohlc_data", source_where, source_params)
+                results[target] = cnt
 
     if results:
         logger.info("Derived OHLC timeframes", extra={
@@ -158,15 +181,16 @@ def derive_ohlc_from_ticks(instrument: str, start, end) -> dict:
 
     tick_targets = ["M1"] + DERIVATION_TARGETS
     with get_db_connection() as con:
-        for target in tick_targets:
-            interval = _safe_interval(target)
-            source_where = "instrument = ? AND timestamp >= ? AND timestamp < ?"
-            source_params = [instrument, start_utc, end_utc]
-            cnt = _derive_bars(con, target, interval, instrument,
-                               "tick_data", source_where, source_params,
-                               open_col="price", high_col="price",
-                               low_col="price", close_col="price")
-            results[target] = cnt
+        with _derivation_session(con):
+            for target in tick_targets:
+                interval = _safe_interval(target)
+                source_where = "instrument = ? AND timestamp >= ? AND timestamp < ?"
+                source_params = [instrument, start_utc, end_utc]
+                cnt = _derive_bars(con, target, interval, instrument,
+                                   "tick_data", source_where, source_params,
+                                   open_col="price", high_col="price",
+                                   low_col="price", close_col="price")
+                results[target] = cnt
 
     if results:
         logger.info("Derived OHLC from ticks", extra={

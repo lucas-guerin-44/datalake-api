@@ -71,8 +71,14 @@ def read_connection():
     """
     Yield an independent DuckDB cursor for READ-ONLY queries.
     Concurrent reads run in parallel via DuckDB's MVCC snapshots.
+    Recovers from an invalidated connection by reconnecting once.
     """
-    con = _get_shared_connection().cursor()
+    try:
+        con = _get_shared_connection().cursor()
+    except duckdb.FatalException:
+        logger.warning("DuckDB connection invalidated on cursor creation, reconnecting")
+        _reconnect()
+        con = _get_shared_connection().cursor()
     try:
         yield con
     finally:
@@ -98,8 +104,33 @@ def bump_data_version() -> None:
 
 
 def duckdb_ready() -> bool:
-    """Cheap readiness signal: True once the database instance is open."""
-    return _db_connection is not None
+    """Test whether the DuckDB connection is alive, not just whether it was opened."""
+    if _db_connection is None:
+        return False
+    try:
+        _db_connection.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
+def _reconnect() -> None:
+    """
+    Close the invalidated connection and open a fresh one.
+
+    Called when DuckDB raises FatalException (e.g. after OOM).  The old
+    connection object is permanently broken; only a reopen helps.
+    """
+    global _db_connection, _initialized
+    with _db_lock:
+        if _db_connection is not None:
+            try:
+                _db_connection.close()
+            except Exception:
+                pass
+            _db_connection = None
+        _initialized = False
+    init_duckdb()
 
 
 # --- Write transaction --------------------------------------------------------
@@ -107,22 +138,37 @@ def duckdb_ready() -> bool:
 _write_tx_lock = threading.Lock()
 
 
+def _try_write_tx(con):
+    """Run one write-transaction attempt. Yields the connection on success."""
+    con.execute("BEGIN TRANSACTION")
+    try:
+        yield con
+        con.execute("COMMIT")
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    bump_data_version()
+
+
 @contextmanager
 def write_transaction():
     """
     Wrap a group of writes in an atomic transaction. Rolls back on any exception.
+
+    If DuckDB has been invalidated (e.g. OOM), reconnects once and retries.
     """
     with _write_tx_lock:
         con = _get_shared_connection()
-        con.execute("BEGIN TRANSACTION")
         try:
-            yield con
-            con.execute("COMMIT")
-        except Exception:
-            con.execute("ROLLBACK")
-            raise
-        else:
-            bump_data_version()
+            yield from _try_write_tx(con)
+        except duckdb.FatalException:
+            logger.warning("DuckDB connection invalidated (likely OOM), reconnecting")
+            _reconnect()
+            con = _get_shared_connection()
+            yield from _try_write_tx(con)
 
 
 # --- Schema initialization ----------------------------------------------------

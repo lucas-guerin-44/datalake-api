@@ -140,6 +140,7 @@ class TestFullIngestQueryDownloadFlow:
         assert first["timeframe"] == "M1"
         assert "timestamp" in first
         assert first["open"] is not None
+        assert first["source"] == "raw"
 
     def test_ingest_then_download_csv(self, seeded_app, sample_csv):
         client, api_key = seeded_app
@@ -165,6 +166,64 @@ class TestFullIngestQueryDownloadFlow:
         lines = [l for l in csv_text.strip().split("\n") if l]
         # Header + 60 data rows
         assert len(lines) == 61
+        # The source column must be exposed so downstream provenance checks work
+        assert lines[0] == "instrument,timeframe,timestamp,open,high,low,close,source"
+
+    def test_ingest_then_query_derived_source(self, seeded_app, sample_csv):
+        """End-to-end provenance: derived rows carry source == 'derived'."""
+        client, api_key = seeded_app
+        headers = {"X-API-Key": api_key}
+
+        # Ingest M1 and wait for derivation so the read-after-write is deterministic
+        with open(sample_csv, "rb") as f:
+            resp = client.post(
+                "/ingest",
+                files={"file": ("XAUUSD_M1_202406010000_202406010100.csv", f, "text/csv")},
+                data={"instrument": "XAUUSD", "timeframe": "M1", "derive": "true", "wait": "true"},
+                headers=headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["derived"] == "done"
+
+        # M5 is materialised from the raw M1 window
+        resp = client.get("/query?instrument=XAUUSD&timeframe=M5&limit=10", headers=headers)
+        assert resp.status_code == 200
+        rows = resp.json()["data"]
+        assert rows
+        assert all(row["source"] == "derived" for row in rows)
+
+    def test_tick_endpoints_omit_source(self, seeded_app, tmp_path):
+        """tick_data has no source column: /ticks and /ticks/download must not expose it."""
+        client, api_key = seeded_app
+        headers = {"X-API-Key": api_key}
+
+        tick_csv = tmp_path / "XAUUSD_TICK_test.csv"
+        tick_csv.write_text(
+            "timestamp,price,volume,bid,ask\n"
+            "2024-06-01 00:00:00,2645.32,1.0,2645.30,2645.34\n"
+            "2024-06-01 00:00:01,2645.50,2.0,2645.48,2645.52\n"
+        )
+        with open(tick_csv, "rb") as f:
+            resp = client.post(
+                "/ingest/ticks",
+                files={"file": ("XAUUSD_TICK_test.csv", f, "text/csv")},
+                data={"instrument": "XAUUSD"},
+                headers=headers,
+            )
+        assert resp.status_code == 200
+
+        # JSON rows must not carry a source key
+        resp = client.get("/ticks?instrument=XAUUSD", headers=headers)
+        assert resp.status_code == 200
+        rows = resp.json()["data"]
+        assert rows
+        assert all("source" not in row for row in rows)
+
+        # CSV header must not include source
+        resp = client.get("/ticks/download?instrument=XAUUSD", headers=headers)
+        assert resp.status_code == 200
+        header = next(l for l in resp.text.strip().split("\n") if l)
+        assert "source" not in header
 
     def test_instruments_endpoint(self, seeded_app, sample_csv):
         client, api_key = seeded_app

@@ -18,7 +18,7 @@ from src.auth.auth import ScopedAuth
 router = APIRouter()
 
 # Table schemas: (table, columns_sql, has_timeframe_column)
-OHLC = ("ohlc_data", "instrument, timeframe, timestamp, open, high, low, close", True)
+OHLC = ("ohlc_data", "instrument, timeframe, timestamp, open, high, low, close, source", True)
 TICKS = ("tick_data", "timestamp, price, volume, bid, ask", False)
 
 CSV_BATCH_SIZE = 1000
